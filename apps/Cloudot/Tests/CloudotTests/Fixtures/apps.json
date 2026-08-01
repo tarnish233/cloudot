@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "result": [
+    {
+      "detected": true,
+      "id": "ghostty",
+      "managed": true,
+      "name": "Ghostty"
+    }
+  ],
+  "schema": "cloudot.apps/v1"
+}

@@ -1,0 +1,14 @@
+# Ghostty 终端。
+# 配置是纯文本，且 Ghostty 只读取、不回写这个文件，所以 symlink 很安全。
+id   = "ghostty"
+name = "Ghostty"
+
+# 任一路径存在，就认为本机装了 ghostty
+detect = [
+  "~/.config/ghostty/config",
+  "/Applications/Ghostty.app",
+]
+
+[[paths]]
+path     = "~/.config/ghostty/config"
+strategy = "symlink"

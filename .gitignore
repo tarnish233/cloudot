@@ -1,0 +1,24 @@
+# Rust
+/target
+
+# SwiftPM：.build 有 830M，build/ 是 make-app.sh 组装出来的 .app
+.build/
+apps/Cloudot/build/
+
+# Xcode 在 open Package.swift 时会生成这些
+*.xcuserstate
+xcuserdata/
+.swiftpm/
+
+# 凭据类。仓库里目前没有，但踩过一次（gitpic 的 config.toml 带 ghp_ token），
+# 所以先把常见形态挡掉 —— 加进 git 历史之后就撤不干净了。
+*.pem
+*.p12
+*.cer
+.env
+.env.*
+secrets.toml
+**/secrets.fish
+
+# macOS
+**/.DS_Store

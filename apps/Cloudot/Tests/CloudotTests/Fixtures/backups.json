@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "result": {
+    "entries": [
+      {
+        "bytes": 3286,
+        "files": 1,
+        "stamp": "20260801-120750"
+      }
+    ],
+    "total_bytes": 3286,
+    "total_files": 1
+  },
+  "schema": "cloudot.backups/v1"
+}

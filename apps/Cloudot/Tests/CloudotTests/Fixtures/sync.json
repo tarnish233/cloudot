@@ -1,0 +1,22 @@
+{
+  "ok": true,
+  "result": {
+    "applied": {
+      "healed": [],
+      "items": [
+        {
+          "action": "already_linked",
+          "backup": null,
+          "before": "linked",
+          "note": null,
+          "target": "~/.config/ghostty/config"
+        }
+      ]
+    },
+    "commit": null,
+    "pull": "up_to_date",
+    "pushed": true,
+    "remote": "/tmp/cloudot-e2e/remote.git"
+  },
+  "schema": "cloudot.sync/v1"
+}

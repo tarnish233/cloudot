@@ -1,0 +1,49 @@
+{
+  "ok": true,
+  "result": {
+    "checks": [
+      {
+        "level": "ok",
+        "message": "设备 coma-white55demac-mini · root /Users/coma_white55/.cloudot",
+        "name": "config"
+      },
+      {
+        "level": "ok",
+        "message": "git 仓库正常（main @ cbcb20e）",
+        "name": "store"
+      },
+      {
+        "level": "ok",
+        "message": "tarnish <tarnished233@gmail.com>",
+        "name": "git-identity"
+      },
+      {
+        "level": "ok",
+        "message": "git@github.com:tarnish233/dotfiles.git",
+        "name": "remote"
+      },
+      {
+        "level": "ok",
+        "message": "与 remote 一致",
+        "name": "sync-state"
+      },
+      {
+        "level": "ok",
+        "message": "已链接",
+        "name": "link:~/.config/ghostty/config"
+      },
+      {
+        "level": "ok",
+        "message": "store 里没扫到明文凭据",
+        "name": "secrets"
+      },
+      {
+        "level": "ok",
+        "message": "1 份备份，共 3.2 KB",
+        "name": "backups"
+      }
+    ],
+    "ok": true
+  },
+  "schema": "cloudot.doctor/v1"
+}

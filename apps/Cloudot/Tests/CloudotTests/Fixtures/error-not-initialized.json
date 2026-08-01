@@ -1,0 +1,9 @@
+{
+  "ok": false,
+  "result": {
+    "kind": "not_initialized",
+    "message": "读不到 /tmp/definitely-not-a-home/.cloudot/config.toml，先跑 `cloudot init`",
+    "summary": "还没初始化"
+  },
+  "schema": "cloudot.error/v1"
+}

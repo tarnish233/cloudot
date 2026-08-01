@@ -1,0 +1,30 @@
+# Karabiner-Elements（~/.config/karabiner/karabiner.json）。
+#
+# ⚠️ 这是三个应用里唯一**真正会踩到 symlink 失效模式**的：Karabiner 的 GUI 保存设置
+# 时是替换写入（写临时文件再 rename），rename 会把软链顶成实体文件。之后本机改的
+# 内容就不再进 store 了，`cloudot status` 会报 `replaced_by_file`，需要
+# `cloudot apply --force`（会先备份本地那份）重新建链。
+#
+# 所以适用前提是：**karabiner.json 只在一台机器上编辑**，其余机器只读。
+# 如果你习惯在多台机器上都用 GUI 改按键映射，别纳管它 —— 那种用法下每次改完都要
+# 手动 apply --force，很容易忘，而忘了就等于没同步。
+#
+# 另外 `profiles[].devices[]` 里记的是 vendor_id / product_id（本机有 6 个设备），
+# 这些是**跟着硬件走**的。同步过去之后，另一台机器上不存在的设备条目不会生效，
+# 但也不会报错；如果两台机器外接键盘不同，devices 段会互相覆盖成对方的列表。
+# complex_modifications（真正的按键规则）是设备无关的，那部分同步是干净的。
+#
+# 不纳管的：
+# - `automatic_backups/` —— Karabiner 自己滚动生成的备份，本机产物
+# - `assets/` —— 复杂修改的规则素材，通常由 GUI 导入
+id   = "karabiner"
+name = "Karabiner-Elements"
+
+detect = [
+  "~/.config/karabiner/karabiner.json",
+  "/Applications/Karabiner-Elements.app",
+]
+
+[[paths]]
+path     = "~/.config/karabiner/karabiner.json"
+strategy = "symlink"

@@ -1,0 +1,35 @@
+{
+  "ok": true,
+  "result": {
+    "apps": [
+      {
+        "adopted_by": "coma-white55demac-mini",
+        "files": [
+          {
+            "state": "linked",
+            "store": "files/.config/ghostty/config",
+            "target": "~/.config/ghostty/config"
+          }
+        ],
+        "id": "ghostty",
+        "name": "Ghostty",
+        "ok": true
+      }
+    ],
+    "available": [],
+    "device": "coma-white55demac-mini",
+    "git": {
+      "ahead": 0,
+      "behind": 0,
+      "branch": "main",
+      "dirty": [],
+      "head": "cbcb20e",
+      "remote": "git@github.com:tarnish233/dotfiles.git",
+      "repo": true
+    },
+    "healthy": true,
+    "orphans": [],
+    "root": "/Users/coma_white55/.cloudot"
+  },
+  "schema": "cloudot.status/v1"
+}

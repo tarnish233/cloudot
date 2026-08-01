@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "result": {
+    "healed": [],
+    "items": [
+      {
+        "action": "already_linked",
+        "backup": null,
+        "before": "linked",
+        "note": null,
+        "target": "~/.config/ghostty/config"
+      }
+    ]
+  },
+  "schema": "cloudot.apply/v1"
+}

@@ -1,0 +1,9 @@
+{
+  "ok": false,
+  "result": {
+    "kind": "unknown_app",
+    "message": "没有名为 nosuchapp 的应用定义。目前支持：ghostty",
+    "summary": "没有这个应用定义"
+  },
+  "schema": "cloudot.error/v1"
+}

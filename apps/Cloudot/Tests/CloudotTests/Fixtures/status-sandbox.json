@@ -1,0 +1,35 @@
+{
+  "ok": true,
+  "result": {
+    "apps": [
+      {
+        "adopted_by": "machine-a",
+        "files": [
+          {
+            "state": "linked",
+            "store": "files/.config/ghostty/config",
+            "target": "~/.config/ghostty/config"
+          }
+        ],
+        "id": "ghostty",
+        "name": "Ghostty",
+        "ok": true
+      }
+    ],
+    "available": [],
+    "device": "machine-a",
+    "git": {
+      "ahead": 0,
+      "behind": 0,
+      "branch": "main",
+      "dirty": [],
+      "head": "c1cab69",
+      "remote": "/tmp/cloudot-e2e/remote.git",
+      "repo": true
+    },
+    "healthy": true,
+    "orphans": [],
+    "root": "/tmp/cloudot-e2e/machine-a/.cloudot"
+  },
+  "schema": "cloudot.status/v1"
+}

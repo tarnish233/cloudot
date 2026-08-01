@@ -1,0 +1,30 @@
+# GitPic 图床上传工具（~/.config/gitpic/config.toml）。
+#
+# ⚠️ 这个文件默认**含有 GitHub token**（`token = "ghp_…"`），所以纳管之前必须先把
+# token 挪出去，否则 cloudot 的凭据门禁会直接拒绝 —— 而那正是它该做的事：一旦进了
+# git 历史就撤不干净了，即便仓库是私有的也一样，因为 token 会明文躺在每台机器上。
+#
+# gitpic 支持用环境变量提供凭据（实测 `GITPIC_TOKEN` 单独设置即可通过
+# `gitpic doctor`：token_valid + repo_writable 都为 true）。所以正确做法是：
+#
+#   1. 从 config.toml 里删掉 `token = …` 那一行
+#   2. 把 token 放进不进 git 的地方，例如 ~/.config/fish/conf.d/secrets.fish：
+#        set -gx GITPIC_TOKEN ghp_xxx
+#      （这个文件不要纳管）
+#   3. `cloudot add gitpic`
+#
+# 剩下的 owner / repo / branch / path_template 等都是无害的偏好设置，值得同步。
+#
+# 相关环境变量（gitpic 二进制里能查到）：
+#   GITPIC_TOKEN · GITPIC_OWNER · GITPIC_REPO · GITPIC_BRANCH · GITPIC_LINK
+id   = "gitpic"
+name = "GitPic"
+
+detect = [
+  "~/.config/gitpic/config.toml",
+  "/opt/homebrew/bin/gitpic",
+]
+
+[[paths]]
+path     = "~/.config/gitpic/config.toml"
+strategy = "symlink"
