@@ -7,7 +7,7 @@ struct AppsPane: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: CloudotTheme.sectionSpacing) {
                 if let managedApps = model.status?.apps, !managedApps.isEmpty {
-                    sectionTitle("已纳管", count: managedApps.count)
+                    sectionTitle("已同步", count: managedApps.count)
 
                     ForEach(managedApps) { app in
                         ManagedAppCard(app: app, model: model)
@@ -15,7 +15,7 @@ struct AppsPane: View {
                 }
 
                 if !model.detectedCandidates.isEmpty {
-                    sectionTitle("检测到但未纳管", count: model.detectedCandidates.count)
+                    sectionTitle("可同步", count: model.detectedCandidates.count)
 
                     GroupBox {
                         VStack(spacing: 0) {
@@ -23,7 +23,7 @@ struct AppsPane: View {
                                 HStack(spacing: CloudotTheme.compactSpacing) {
                                     Label(app.name, systemImage: "app.dashed")
                                     Spacer()
-                                    Button("纳管") {
+                                    Button("同步") {
                                         model.pending = .adopt(id: app.id, name: app.name)
                                     }
                                     .disabled(model.isBusy)
@@ -43,7 +43,7 @@ struct AppsPane: View {
                     ContentUnavailableView(
                         "没有可管理的应用",
                         systemImage: "app.badge",
-                        description: Text("cloudot 暂未发现已纳管或可纳管的应用配置。")
+                        description: Text("Cloudot 暂未发现已同步或可同步的应用配置。")
                     )
                     .frame(maxWidth: .infinity, minHeight: 220)
                 }

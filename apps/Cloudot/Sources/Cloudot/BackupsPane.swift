@@ -46,7 +46,7 @@ struct BackupsPane: View {
                 ContentUnavailableView(
                     "还没有备份",
                     systemImage: "clock.arrow.circlepath",
-                    description: Text("纳管或覆盖配置时会自动生成备份。")
+                    description: Text("同步或覆盖配置时会自动生成备份。")
                 )
             }
         }

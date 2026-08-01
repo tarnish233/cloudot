@@ -12,9 +12,9 @@ struct MenuBarStatusContent: View {
 
             if status.apps.isEmpty {
                 ContentUnavailableView(
-                    "还没纳管应用",
+                    "还没有同步应用",
                     systemImage: "app.badge",
-                    description: Text("打开主窗口查看可纳管的应用。")
+                    description: Text("打开设置查看可同步的应用。")
                 )
                 .frame(minHeight: 128)
                 .background(.quaternary, in: .rect(cornerRadius: 12))

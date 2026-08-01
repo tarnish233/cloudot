@@ -20,8 +20,8 @@ enum PendingAction: Identifiable {
 
     var title: String {
         switch self {
-        case .adopt(_, let name): "纳管 \(name)？"
-        case .unadopt(_, let name): "让 \(name) 退出纳管？"
+        case .adopt(_, let name): "同步 \(name)？"
+        case .unadopt(_, let name): "停止同步 \(name)？"
         case .pruneBackups: "清理旧备份？"
         }
     }
@@ -31,7 +31,7 @@ enum PendingAction: Identifiable {
         case .adopt(_, let name):
             """
             会把 \(name) 的配置文件移进 ~/.cloudot/store，原地留一个软链指过去。
-            动手之前会先备份到 ~/.cloudot/backups，随时可以退出纳管拿回来。
+            动手之前会先备份到 ~/.cloudot/backups，之后可以停止同步并还原本地文件。
             """
         case .unadopt(_, let name):
             """
@@ -48,8 +48,8 @@ enum PendingAction: Identifiable {
 
     var confirmLabel: String {
         switch self {
-        case .adopt: "纳管"
-        case .unadopt: "退出纳管"
+        case .adopt: "同步"
+        case .unadopt: "停止同步"
         case .pruneBackups: "删除"
         }
     }
@@ -417,13 +417,13 @@ final class AppModel {
             await perform(subject: id) { cli in
                 let results = try await cli.add(id)
                 let files = results.flatMap(\.files).map(\.target)
-                return .ok("\(name) 已纳管", files.joined(separator: "\n"))
+                return .ok("\(name) 已加入同步", files.joined(separator: "\n"))
             }
         case .unadopt(let id, let name):
             await perform(subject: id) { cli in
                 let result = try await cli.unadopt(id)
                 return .ok(
-                    "\(name) 已退出纳管",
+                    "\(name) 已停止同步",
                     result.restored.map { "\($0) 已还原成实体文件" }.joined(separator: "\n")
                 )
             }

@@ -12,7 +12,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 APP="$HERE/build/Cloudot.app"
 
 BUNDLE_ID="com.tarnish233.cloudot"
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 echo "==> 构建 GUI（${CONFIG}）"
 swift build --package-path "$HERE" -c "$CONFIG"
@@ -64,7 +64,7 @@ $ICON_KEY
   <key>NSHumanReadableCopyright</key>  <string>cloudot</string>
   <!-- 纯菜单栏工具：不占 Dock、不进 Cmd-Tab。
        代价是没有 App 自己的菜单栏，所以快捷键挂在按钮上而不是 .commands。
-       主窗口从菜单栏面板的「打开主窗口」进入。 -->
+       主窗口从菜单栏面板的「设置」进入。 -->
   <key>LSUIElement</key>               <true/>
   <key>NSSupportsAutomaticTermination</key> <false/>
   <key>NSSupportsSuddenTermination</key>    <false/>

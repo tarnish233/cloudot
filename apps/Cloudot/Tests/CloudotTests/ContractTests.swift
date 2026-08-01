@@ -52,6 +52,21 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(report.checks.contains { $0.name == "secrets" })
     }
 
+    func testDoctorChecksAreCategorized() throws {
+        let report = try decodeOK("doctor", DoctorReport.self)
+        let categorized = DoctorCategory.allCases.flatMap { $0.checks(in: report) }
+
+        XCTAssertEqual(Set(categorized.map(\.id)), Set(report.checks.map(\.id)))
+        XCTAssertEqual(
+            DoctorCategory.category(for: try XCTUnwrap(report.checks.first { $0.name == "sync-state" })),
+            .synchronization
+        )
+        XCTAssertEqual(
+            DoctorCategory.category(for: try XCTUnwrap(report.checks.first { $0.name.hasPrefix("link:") })),
+            .files
+        )
+    }
+
     func testAppsDecodes() throws {
         let apps = try decodeOK("apps", [AppListing].self)
         XCTAssertEqual(apps.first?.id, "ghostty")

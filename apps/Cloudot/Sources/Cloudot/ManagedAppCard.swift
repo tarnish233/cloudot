@@ -53,17 +53,17 @@ struct ManagedAppCard: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(app.name)
                     .font(.headline)
-                Text("由 \(app.adoptedBy) 纳管")
+                Text("同步设备：\(app.adoptedBy)")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(app.name)，\(app.ok ? "状态正常" : "需要处理")，由 \(app.adoptedBy) 纳管")
+        .accessibilityLabel("\(app.name)，\(app.ok ? "状态正常" : "需要处理")，同步设备 \(app.adoptedBy)")
     }
 
     private var unadoptButton: some View {
-        Button("退出纳管", role: .destructive) {
+        Button("停止同步", role: .destructive) {
             model.pending = .unadopt(id: app.id, name: app.name)
         }
         .disabled(model.isBusy)

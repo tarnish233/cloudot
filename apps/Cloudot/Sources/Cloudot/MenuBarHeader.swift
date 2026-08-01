@@ -45,7 +45,7 @@ struct MenuBarHeader: View {
     private func gitSummary(_ git: GitInfo) -> String {
         guard git.repo else { return "store 还不是 git 仓库" }
         var parts: [String] = []
-        if let branch = git.branch, let head = git.head { parts.append("\(branch) @ \(head)") }
+        if let branch = git.branch { parts.append(branch) }
         if let ahead = git.ahead, ahead > 0 { parts.append("领先 \(ahead)") }
         if let behind = git.behind, behind > 0 { parts.append("落后 \(behind)") }
         if !git.dirty.isEmpty { parts.append("\(git.dirty.count) 处未提交") }

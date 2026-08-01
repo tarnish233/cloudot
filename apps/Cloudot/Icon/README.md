@@ -6,12 +6,22 @@
 `.icns` 装进 bundle。LSUIElement 应用没有 Dock 图标，但 Finder、Spotlight 和 DMG 里
 仍然要看它。
 
-### ⚠️ 授权待处理
+### 授权
 
-取自 macosicons 上 **@Luca K** 的「Smart Backup」，站上没有明确许可。
+**原创设计，无第三方素材。** 全部由 [make-icon.swift](make-icon.swift) 用 CoreGraphics
+绘制，重新生成：
 
-**自己机器上用没问题，但分发前（公证 DMG / homebrew tap）必须先联系作者取得授权，
-或者换成原创图。** `design-icons.swift` 里有一组可用的原创方案。
+```bash
+cd apps/Cloudot/Icon && swift make-icon.swift
+```
+
+构图取的是 cloudot 自己的核心意象 —— **软链**：两个节点（本机 / 共享 store）由一条
+留缺口的环形链路相连，缺口处用箭头收尾表示单向落地。整体轮廓恰好像个「c」。
+32px 下验证过仍可辨认。
+
+早先的版本派生自 macosicons 上 @Luca K 的「Smart Backup」，那站没有明确许可，
+已在开源前替换掉。`design-icons.swift` 是那一版的渲染器，**它的构图同样取自那件作品，
+所以也不能用于分发** —— 留着仅作记录。
 
 ### 关于深浅色自适应
 

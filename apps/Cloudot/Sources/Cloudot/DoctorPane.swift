@@ -8,15 +8,25 @@ struct DoctorPane: View {
             Group {
                 if let report = model.doctor {
                     LazyVStack(alignment: .leading, spacing: CloudotTheme.sectionSpacing) {
-                        Label(
-                            report.ok ? "没有致命问题" : "存在需要处理的问题",
-                            systemImage: report.ok ? "checkmark.seal.fill" : "xmark.seal.fill"
-                        )
-                        .foregroundStyle(report.ok ? SystemTheme.accentColor : .red)
-                        .font(.headline)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Label(
+                                report.ok ? "整体状态良好" : "发现需要处理的问题",
+                                systemImage: report.ok ? "checkmark.seal.fill" : "xmark.seal.fill"
+                            )
+                            .foregroundStyle(report.ok ? SystemTheme.accentColor : .red)
+                            .font(.title3.bold())
 
-                        ForEach(report.checks.sorted(by: { $0.level > $1.level })) { check in
-                            DoctorCheckRow(check: check)
+                            Text("已完成 \(report.checks.count) 项检查，并按用途归类。")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        .accessibilityElement(children: .combine)
+
+                        ForEach(DoctorCategory.allCases) { category in
+                            let checks = category.checks(in: report)
+                            if !checks.isEmpty {
+                                DoctorCheckSection(category: category, checks: checks)
+                            }
                         }
                     }
                 } else {

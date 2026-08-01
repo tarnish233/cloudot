@@ -5,37 +5,71 @@ struct MenuBarFooter: View {
     let openMainWindow: () -> Void
 
     var body: some View {
-        HStack(spacing: CloudotTheme.compactSpacing) {
-            Button("主窗口", systemImage: "macwindow", action: openMainWindow)
-                .buttonStyle(.borderless)
-
-            Spacer(minLength: CloudotTheme.compactSpacing)
+        VStack(spacing: CloudotTheme.compactSpacing) {
+            Divider()
 
             if model.hasApplyableWork {
-                Button("落地", systemImage: "arrow.down.circle", action: apply)
-                    .disabled(model.isBusy)
+                Button(action: apply) {
+                    Label("修复并落地", systemImage: "arrow.down.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .help("从 Git 历史或备份恢复配置并重新落地")
+                .keyboardShortcut(.return, modifiers: [.command, .shift])
+                .disabled(model.isBusy)
             }
 
-            Button("刷新状态", systemImage: "arrow.clockwise", action: refresh)
-                .labelStyle(.iconOnly)
-                .buttonStyle(.borderedProminent)
+            HStack(spacing: CloudotTheme.compactSpacing) {
+                Button(action: openMainWindow) {
+                    Label("设置", systemImage: "macwindow")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                .accessibilityLabel("Cloudot 设置")
+                .help("打开 Cloudot 设置")
+
+                Button(action: refresh) {
+                    Label("刷新", systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
                 .keyboardShortcut("r", modifiers: [.command])
                 .disabled(model.isBusy)
                 .help(refreshHelp)
 
-            Button("立即同步", systemImage: "arrow.triangle.2.circlepath", action: sync)
+                Button(action: sync) {
+                    Label("立即同步", systemImage: "arrow.triangle.2.circlepath")
+                        .frame(maxWidth: .infinity)
+                }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
                 .keyboardShortcut("s", modifiers: [.command])
                 .disabled(!model.isReady || model.isBusy)
+                .help("提交本地改动、拉取远端并推送（⌘S）")
+            }
 
-            Button("退出 Cloudot", systemImage: "power", action: quit)
-                .labelStyle(.iconOnly)
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut("q", modifiers: [.command])
-                .help("退出 Cloudot（⌘Q）")
+            HStack(spacing: CloudotTheme.compactSpacing) {
+                if let lastRefresh = model.lastRefresh {
+                    Label(Format.relative(lastRefresh), systemImage: "clock")
+                        .font(.callout)
+                        .foregroundStyle(.tertiary)
+                        .accessibilityLabel("上次更新：\(Format.relative(lastRefresh))")
+                }
+
+                Spacer(minLength: CloudotTheme.compactSpacing)
+
+                Button("退出", systemImage: "power", action: quit)
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .keyboardShortcut("q", modifiers: [.command])
+                    .help("退出 Cloudot（⌘Q）")
+            }
         }
         .padding(.horizontal, CloudotTheme.sectionSpacing)
-        .padding(.top, 4)
+        .padding(.top, CloudotTheme.compactSpacing)
         .padding(.bottom, CloudotTheme.sectionSpacing)
     }
 

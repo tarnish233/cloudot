@@ -148,7 +148,7 @@ open build/Cloudot.app
 ./test.sh              # Swift 契约与界面测试（需要 Xcode 提供 XCTest）
 ```
 
-主窗口从菜单栏面板的「打开主窗口」进入，分**概览 / 应用 / 体检 / 备份**四个页面。
+主窗口从菜单栏面板的「设置」进入，分**概览 / 应用 / 体检 / 备份**四个页面。
 
 ### 菜单栏图标
 
@@ -167,7 +167,7 @@ open build/Cloudot.app
 
 动画会遵守 macOS 的“减少动态效果”辅助功能设置；开启后只显示对应静态姿态。
 
-应用图标见 [Icon/README.md](apps/Cloudot/Icon/README.md)（含一条待处理的授权说明）。
+应用图标见 [Icon/README.md](apps/Cloudot/Icon/README.md)，由 CoreGraphics 绘制，不使用第三方素材。
 应用图标不支持深浅色自适应——`.icns` 无变体概念，appiconset 的 dark 图会被 `actool`
 静默丢弃，macOS 26 的自适应要靠只有 GUI 的 Icon Composer。菜单栏图标不受影响，
 它是单色 template 渲染，本来就跟随系统外观。
