@@ -2,7 +2,7 @@ use crate::config::{default_device_name, timestamp};
 use crate::git::{Git, PullOutcome};
 use crate::link::{self, AdoptAction, AdoptReport, LinkState};
 use crate::links::{Orphan, OrphanKind};
-use crate::manifest::{ManagedApp, ManagedFile};
+use crate::manifest::{ManagedApp, ManagedFile, Strategy};
 use crate::{Config, Layout, LinkRecords, Lock, Manifest, adopter, links, secrets};
 use anyhow::{Context, Result, bail};
 use std::collections::HashSet;
@@ -123,13 +123,28 @@ pub struct AddOutcome {
     pub name: String,
     pub files: Vec<FileOutcome>,
     pub commit: Option<String>,
+    /// 这次是预演（`--dry-run`），什么都没真的做。
+    ///
+    /// 加字段而不是改 `action` 的语义：消费方旧代码读到的 `action` 仍然是
+    /// 「发生了什么」，只是要配合这个字段读成「将会发生什么」。
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 /// 纳管一个应用：备份本地配置 → 移进 store → 建软链 → 记 manifest → 提交。
 ///
 /// 要么全部路径都成功，要么整体回滚。半纳管状态（文件已经被链进 store 但 manifest
 /// 和 links.toml 都没记）是最难收拾的：`status` 看不见它，`unadopt` 也撤不掉。
-pub fn add(layout: &Layout, app_id: &str, force: bool, allow_secrets: bool) -> Result<AddOutcome> {
+///
+/// `dry_run` 时**所有校验照常跑**（检测门禁、凭据扫描、逐路径可行性），只是不动
+/// 文件、不写 manifest/links.toml、不提交 —— 预演的价值恰恰在于让这些校验先说话。
+pub fn add(
+    layout: &Layout,
+    app_id: &str,
+    force: bool,
+    allow_secrets: bool,
+    dry_run: bool,
+) -> Result<AddOutcome> {
     let _lock = Lock::acquire(layout)?;
     let config = Config::load(layout)?;
     let ad = adopter::get(layout, app_id)?;
@@ -195,10 +210,21 @@ pub fn add(layout: &Layout, app_id: &str, force: bool, allow_secrets: bool) -> R
 
     for path in &ad.paths {
         let target = layout.expand(&path.path);
+        // 路径计算与写入分开：预演要拿到 store 位置和预测结论，但不能动文件。
         let step = layout.store_rel_for(&target).and_then(|store_rel| {
             let store_abs = layout.store_path(&store_rel);
-            link::adopt_file(layout, &target, &store_abs, &stamp, force)
-                .map(|report| (store_rel, store_abs, report))
+            if dry_run {
+                link::plan_adopt(layout, &target, &store_abs, force).map(|action| {
+                    let report = AdoptReport {
+                        action,
+                        backup: None,
+                    };
+                    (store_rel, store_abs, report)
+                })
+            } else {
+                link::adopt_file(layout, &target, &store_abs, &stamp, force)
+                    .map(|report| (store_rel, store_abs, report))
+            }
         });
 
         match step {
@@ -226,6 +252,10 @@ pub fn add(layout: &Layout, app_id: &str, force: bool, allow_secrets: bool) -> R
     }
 
     if let Some(err) = failure {
+        // 预演没动过东西，没有可回滚的；直接把校验结论抛出去。
+        if dry_run {
+            return Err(err.context(format!("预演：纳管 {} 会失败", ad.name)));
+        }
         let mut unwind_errors = Vec::new();
         for (target, store, report) in done.iter().rev() {
             if let Err(e) = link::revert_adopt(target, store, report) {
@@ -253,6 +283,17 @@ pub fn add(layout: &Layout, app_id: &str, force: bool, allow_secrets: bool) -> R
         adopted_by,
         files: managed,
     });
+
+    if dry_run {
+        return Ok(AddOutcome {
+            id: ad.id,
+            name: ad.name,
+            files,
+            commit: None,
+            dry_run: true,
+        });
+    }
+
     manifest.save(layout)?;
     records.save(layout)?;
 
@@ -264,6 +305,7 @@ pub fn add(layout: &Layout, app_id: &str, force: bool, allow_secrets: bool) -> R
         name: ad.name,
         files,
         commit,
+        dry_run: false,
     })
 }
 
@@ -318,34 +360,54 @@ pub struct ApplyOutcome {
     pub items: Vec<ApplyItem>,
     /// 被修复的孤儿软链（manifest 里已经没有、却还指向 store 的链）。
     pub healed: Vec<HealItem>,
+    /// 这次是预演，什么都没真的做。见 [`AddOutcome::dry_run`]。
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 /// 把 store 里的内容落地到本机 —— 新机器上的主命令。
 ///
 /// 默认不覆盖本地实体文件：那份内容可能比 store 新。要覆盖得显式 `--force`，
 /// 且一定先备份。
-pub fn apply(layout: &Layout, force: bool) -> Result<ApplyOutcome> {
+pub fn apply(layout: &Layout, force: bool, dry_run: bool) -> Result<ApplyOutcome> {
     let _lock = Lock::acquire(layout)?;
-    apply_inner(layout, force)
+    apply_inner(layout, force, dry_run)
 }
 
 /// 不加锁的实现。`sync` 已经持有锁，不能再走公开的 [`apply`]
 /// —— flock 按打开的文件描述生效，同进程二次加锁一样会冲突。
-fn apply_inner(layout: &Layout, force: bool) -> Result<ApplyOutcome> {
+fn apply_inner(layout: &Layout, force: bool, dry_run: bool) -> Result<ApplyOutcome> {
     let manifest = Manifest::load(layout)?;
     let mut records = LinkRecords::load(layout)?;
     let stamp = timestamp();
 
     // 先处理孤儿：manifest 里已经没有它们了，留着就是悬空软链，App 读不到配置。
     let orphans = links::find_orphans(layout, &manifest, &records);
-    let healed = heal_orphans(layout, &orphans, &mut records)?;
+    let healed = heal_orphans(layout, &orphans, &mut records, dry_run)?;
+
+    // 真跑时 heal 会把孤儿目标写成实体文件，后面的 inspect 因此看到的是修完的样子。
+    // 预演没动过盘，要自己把这批目标记下来，免得报出的 before 和真跑不一致。
+    let healed_targets: HashSet<&str> = if dry_run {
+        healed
+            .iter()
+            .filter(|h| h.source != HealSource::Failed)
+            .map(|h| h.target.as_str())
+            .collect()
+    } else {
+        HashSet::new()
+    };
 
     let mut items = Vec::new();
     for app in &manifest.apps {
         for file in &app.files {
             let target = layout.expand(&file.target);
             let store = layout.store_path(&file.store);
-            let before = link::inspect(&target, &store);
+            let before = if healed_targets.contains(file.target.as_str()) {
+                // 预演：heal 会把它还原成实体文件，真跑时 inspect 就会这么看到
+                LinkState::ReplacedByFile
+            } else {
+                link::inspect(&target, &store)
+            };
 
             let item = match before {
                 LinkState::Linked => ApplyItem {
@@ -356,7 +418,14 @@ fn apply_inner(layout: &Layout, force: bool) -> Result<ApplyOutcome> {
                     note: None,
                 },
                 LinkState::Missing => {
-                    let report = link::adopt_file(layout, &target, &store, &stamp, force)?;
+                    let report = if dry_run {
+                        AdoptReport {
+                            action: link::plan_adopt(layout, &target, &store, force)?,
+                            backup: None,
+                        }
+                    } else {
+                        link::adopt_file(layout, &target, &store, &stamp, force)?
+                    };
                     ApplyItem {
                         target: file.target.clone(),
                         before,
@@ -370,7 +439,14 @@ fn apply_inner(layout: &Layout, force: bool) -> Result<ApplyOutcome> {
                 }
                 LinkState::ReplacedByFile => {
                     if force {
-                        let report = link::adopt_file(layout, &target, &store, &stamp, true)?;
+                        let report = if dry_run {
+                            AdoptReport {
+                                action: link::plan_adopt(layout, &target, &store, true)?,
+                                backup: None,
+                            }
+                        } else {
+                            link::adopt_file(layout, &target, &store, &stamp, true)?
+                        };
                         ApplyItem {
                             target: file.target.clone(),
                             before,
@@ -416,8 +492,14 @@ fn apply_inner(layout: &Layout, force: bool) -> Result<ApplyOutcome> {
     }
 
     prune_records(layout, &manifest, &mut records);
-    records.save(layout)?;
-    Ok(ApplyOutcome { items, healed })
+    if !dry_run {
+        records.save(layout)?;
+    }
+    Ok(ApplyOutcome {
+        items,
+        healed,
+        dry_run,
+    })
 }
 
 /// 清掉既不在 manifest、也不再指向 store 的陈旧记录。
@@ -436,10 +518,14 @@ fn prune_records(layout: &Layout, manifest: &Manifest, records: &mut LinkRecords
 ///
 /// 修不好时**不删任何东西** —— 宁可留一个坏链让 `doctor` 继续报警，
 /// 也不能把用户唯一的线索抹掉。
+///
+/// `dry_run` 时照常去找内容（git 历史、备份），只是不落盘 —— 「能不能修好」
+/// 恰恰是预演最该回答的问题，光报「有个孤儿」没用。
 fn heal_orphans(
     layout: &Layout,
     orphans: &[Orphan],
     records: &mut LinkRecords,
+    dry_run: bool,
 ) -> Result<Vec<HealItem>> {
     let git = Git::new(layout.store());
     let mut out = Vec::new();
@@ -451,22 +537,37 @@ fn heal_orphans(
         let (source, note) = match orphan.kind {
             OrphanKind::Unmanaged => match fs::read(&store)
                 .with_context(|| format!("读取 {} 失败", store.display()))
-                .and_then(|bytes| write_real_file(&target, &bytes))
-            {
+                .and_then(|bytes| {
+                    if dry_run {
+                        Ok(())
+                    } else {
+                        write_real_file(&target, &bytes)
+                    }
+                }) {
                 Ok(()) => (HealSource::Store, None),
                 Err(e) => (HealSource::Failed, Some(format!("{e:#}"))),
             },
             OrphanKind::Dangling => {
                 if let Some(bytes) = git.content_before_deletion(&orphan.store) {
-                    match write_real_file(&target, &bytes) {
+                    let done = if dry_run {
+                        Ok(())
+                    } else {
+                        write_real_file(&target, &bytes)
+                    };
+                    match done {
                         Ok(()) => (HealSource::GitHistory, None),
                         Err(e) => (HealSource::Failed, Some(format!("{e:#}"))),
                     }
                 } else if let Some(backup) = newest_backup(layout, &target) {
                     match fs::read(&backup)
                         .with_context(|| format!("读取备份 {} 失败", backup.display()))
-                        .and_then(|bytes| write_real_file(&target, &bytes))
-                    {
+                        .and_then(|bytes| {
+                            if dry_run {
+                                Ok(())
+                            } else {
+                                write_real_file(&target, &bytes)
+                            }
+                        }) {
                         Ok(()) => (
                             HealSource::Backup,
                             Some(format!("取自备份 {}", backup.display())),
@@ -535,13 +636,29 @@ pub struct SyncOutcome {
     pub remote: Option<String>,
     /// pull 之后重新落地的结果（别的机器新纳管的应用会在这里被建链）。
     pub applied: ApplyOutcome,
+    /// 这次是预演，什么都没真的做。见 [`AddOutcome::dry_run`]。
+    #[serde(default)]
+    pub dry_run: bool,
+    /// 仅预演：将被提交的文件（store 工作树里的未提交改动）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub would_commit: Option<Vec<String>>,
+    /// 仅预演：本地缓存的 `@{upstream}` 显示落后远端多少个提交。
+    ///
+    /// **不 fetch**，所以这个数字可能是旧的 —— 它只说明「上次见到的远端」。
+    /// 真要知道当下差多少，得跑真的 `sync`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behind: Option<u32>,
 }
 
 /// 提交 → 拉取 → 推送 → 重新落地。
 ///
 /// 最后那步 apply 是「同步」真正成立的关键：别的机器新增的应用需要在本机建链，
 /// 别的机器移除的应用需要在本机把软链还原成实体文件。
-pub fn sync(layout: &Layout, message: Option<&str>) -> Result<SyncOutcome> {
+///
+/// `dry_run` **刻意不联网**：不 fetch、不 commit、不 push。它回答三个纯本地的
+/// 问题 —— 将提交哪些文件、本地缓存里落后远端多少、apply 会动哪些链接。
+/// 想知道远端当下的真实状态只能跑真的 sync（那才是它该做的事）。
+pub fn sync(layout: &Layout, message: Option<&str>, dry_run: bool) -> Result<SyncOutcome> {
     let _lock = Lock::acquire(layout)?;
     let config = Config::load(layout)?;
     let git = Git::new(layout.store());
@@ -556,10 +673,28 @@ pub fn sync(layout: &Layout, message: Option<&str>) -> Result<SyncOutcome> {
         Some(m) => m.to_owned(),
         None => format!("cloudot: sync from {}", config.device),
     };
+
+    if dry_run {
+        let dirty = git.dirty_files()?;
+        let behind = git.ahead_behind().map(|(_, behind)| behind);
+        let applied = apply_inner(layout, false, true)?;
+        return Ok(SyncOutcome {
+            commit: None,
+            // 没 fetch，所以谈不上「拉取结果」
+            pull: PullOutcome::Skipped,
+            pushed: false,
+            remote: git.remote(),
+            applied,
+            dry_run: true,
+            would_commit: Some(dirty),
+            behind,
+        });
+    }
+
     let commit = git.commit_all(&msg)?;
     let pull = git.pull_rebase()?;
     let pushed = git.push()?;
-    let applied = apply_inner(layout, false)?;
+    let applied = apply_inner(layout, false, false)?;
 
     Ok(SyncOutcome {
         commit,
@@ -567,6 +702,9 @@ pub fn sync(layout: &Layout, message: Option<&str>) -> Result<SyncOutcome> {
         pushed,
         remote: git.remote(),
         applied,
+        dry_run: false,
+        would_commit: None,
+        behind: None,
     })
 }
 
@@ -630,7 +768,7 @@ pub fn resolve(layout: &Layout, side: ResolveSide) -> Result<ResolveOutcome> {
                 );
             }
             git.reset_hard(&remote_ref)?;
-            let applied = apply_inner(layout, false)?;
+            let applied = apply_inner(layout, false, false)?;
             Ok(ResolveOutcome {
                 side,
                 target: remote_ref,
@@ -658,12 +796,15 @@ pub struct UnadoptOutcome {
     pub name: String,
     pub restored: Vec<String>,
     pub commit: Option<String>,
+    /// 这次是预演，什么都没真的做。见 [`AddOutcome::dry_run`]。
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 /// 退出纳管：软链换回实体文件，从 store 和 manifest 里移除。
 ///
 /// 这是产品可信度的逃生门 —— 用户随时能把配置拿回来。
-pub fn unadopt(layout: &Layout, app_id: &str) -> Result<UnadoptOutcome> {
+pub fn unadopt(layout: &Layout, app_id: &str, dry_run: bool) -> Result<UnadoptOutcome> {
     let _lock = Lock::acquire(layout)?;
     let config = Config::load(layout)?;
     let mut manifest = Manifest::load(layout)?;
@@ -679,9 +820,21 @@ pub fn unadopt(layout: &Layout, app_id: &str) -> Result<UnadoptOutcome> {
     for file in &app.files {
         let target = layout.expand(&file.target);
         let store = layout.store_path(&file.store);
-        link::unadopt_file(layout, &target, &store)?;
-        records.remove_target(&file.target);
+        if !dry_run {
+            link::unadopt_file(layout, &target, &store)?;
+            records.remove_target(&file.target);
+        }
         restored.push(file.target.clone());
+    }
+
+    if dry_run {
+        return Ok(UnadoptOutcome {
+            id: app.id,
+            name: app.name,
+            restored,
+            commit: None,
+            dry_run: true,
+        });
     }
 
     manifest.save(layout)?;
@@ -694,6 +847,7 @@ pub fn unadopt(layout: &Layout, app_id: &str) -> Result<UnadoptOutcome> {
         name: app.name,
         restored,
         commit,
+        dry_run: false,
     })
 }
 
@@ -718,4 +872,83 @@ pub fn apps(layout: &Layout) -> Result<Vec<AppListing>> {
             name: ad.name,
         })
         .collect())
+}
+
+// ---------------------------------------------------------------- show
+
+pub const SHOW_SCHEMA: &str = "cloudot.show/v1";
+
+/// 一个应用会动到的单个路径。
+#[derive(Debug, serde::Serialize)]
+pub struct ShowPath {
+    /// 家目录相对形式（`~/.config/…`），和 manifest 里存的一致。
+    pub target: String,
+    /// 在 store 里的相对位置。算不出来时为 None（家目录之外、含 `..` 之类）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
+    pub strategy: Strategy,
+    /// 当前链接状态。未纳管时多半是 `store_missing` 或 `replaced_by_file`。
+    pub state: LinkState,
+    /// 本机这个路径当前存在吗（软链也算）。
+    pub exists: bool,
+}
+
+/// `cloudot show <app>` 的输出：定义 + 当前状态。
+///
+/// 刻意不直接序列化 [`adopter::Adopter`]：输出结构要能独立演进，
+/// 而 adopter 是存储格式（用户会手写 TOML），两者耦合起来以后不好改。
+#[derive(Debug, serde::Serialize)]
+pub struct ShowOutcome {
+    pub id: String,
+    pub name: String,
+    /// 本机检测到这个应用了吗（`detect` 里任一路径存在即为真）。
+    pub detected: bool,
+    pub managed: bool,
+    /// 纳管它的设备名，未纳管时为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adopted_by: Option<String>,
+    /// 用来判断「装没装」的探测路径。
+    pub detect: Vec<String>,
+    pub paths: Vec<ShowPath>,
+}
+
+/// 看一个应用的定义和当前状态 —— 纳管之前先知道会动哪些文件。
+///
+/// 纯只读，不加锁。未 init 也能用：adopter 定义来自编译进二进制的内置表加
+/// `~/.cloudot/adopters/`，不需要 `config.toml`。
+pub fn show(layout: &Layout, app_id: &str) -> Result<ShowOutcome> {
+    let ad = adopter::get(layout, app_id)?;
+    let manifest = Manifest::load(layout)?;
+    let managed_app = manifest.app(&ad.id);
+
+    let paths = ad
+        .paths
+        .iter()
+        .map(|p| {
+            let target = layout.expand(&p.path);
+            let store_rel = layout.store_rel_for(&target).ok();
+            let state = match &store_rel {
+                Some(rel) => link::inspect(&target, &layout.store_path(rel)),
+                // 算不出 store 位置的路径根本纳管不了，报 store 缺失最贴近事实
+                None => LinkState::StoreMissing,
+            };
+            ShowPath {
+                target: layout.contract(&target),
+                store: store_rel,
+                strategy: p.strategy,
+                state,
+                exists: fs::symlink_metadata(&target).is_ok(),
+            }
+        })
+        .collect();
+
+    Ok(ShowOutcome {
+        detected: ad.detected(layout),
+        managed: managed_app.is_some(),
+        adopted_by: managed_app.map(|a| a.adopted_by.clone()),
+        id: ad.id,
+        name: ad.name,
+        detect: ad.detect,
+        paths,
+    })
 }

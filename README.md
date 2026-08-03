@@ -37,6 +37,8 @@ cloudot apply              # 落地到本机
 
 日常：改完配置跑 `cloudot sync`；怀疑有问题跑 `cloudot doctor`；想退出纳管跑 `cloudot unadopt ghostty`。
 
+动手之前想先看会发生什么：`cloudot show <app>`（会动哪些文件）或给写命令加 `--dry-run`（预演）。
+
 | 命令 | 用途 |
 |---|---|
 | `init [--remote URL] [--device NAME]` | 初始化，可重复执行 |
@@ -48,7 +50,32 @@ cloudot apply              # 落地到本机
 | `unadopt <app>` | 退出纳管，还原成实体文件 |
 | `doctor [--json] [--net]` | 体检；有 error 时以非零码退出 |
 | `apps [--json]` | 已知应用定义及检测/纳管状态 |
+| `show <app> [--json]` | 一个应用的定义 + 每个路径的当前状态 |
 | `backups [--json]`<br>`backups prune [--keep N] [--older-than D]` | 盘点 / 清理备份 |
+
+全局开关：`--json`（统一信封输出）、`--dry-run`（只报告不动手）。
+
+### 预演（`--dry-run`）
+
+破坏性操作可以先看一遍再决定：
+
+```bash
+cloudot add fish --dry-run       # 会移动哪些文件、备份到哪、有没有疑似凭据
+cloudot apply --dry-run          # 会建哪些链、哪些会被跳过及原因
+cloudot sync --dry-run           # 会提交哪些改动、会不会推送、会落地什么
+cloudot unadopt fish --dry-run
+cloudot backups prune --keep 5 --dry-run
+```
+
+几条刻意的取舍：
+
+- **校验照常跑。** 检测门禁、凭据扫描、逐路径可行性判断在预演里全都执行 —— 预演的主要价值就是让这些先说话，而不是只画一张乐观的清单。
+- **`sync --dry-run` 不联网。** 不 fetch、不 commit、不 push。落后远端几个提交读的是**本地缓存**的 `@{upstream}`，所以那个数字可能是旧的（输出里会写明）。要知道远端当下的真实状态，只能跑真的 `sync`。
+- **`init` 与 `resolve` 不支持**，会以 `unsupported` 明确拒绝。`init` 建的就是 `~/.cloudot` 本身，没有可预演的既有状态，而且它可重复执行；`resolve` 之前该看的是 diff，冲突时 `sync` 已经把每个文件的 diff 打出来了。
+- **只读命令静默忽略它**（`status` / `doctor` / `apps` / `show`）—— 它们本来就不写盘。
+- JSON 信封里加的是 `dry_run: true` 字段，**没有改 `action` 的语义**。消费方旧代码读到的 `action` 仍然是「发生了什么」，配合这个字段读成「将会发生什么」。
+
+预演最危险的地方是「预测」和「真做」走两段独立代码，一旦漂移就会骗人 —— 那比没有预演更糟。所以 [link.rs](crates/cloudot-core/src/link.rs) 里的 `plan_adopt` 和 `adopt_file` 有测试逐分支比对结论与错误分类。
 
 ## 目录布局
 
@@ -212,6 +239,8 @@ SF Symbol，菜单栏和 Finder 里认的是同一个东西。刷新中和同步
 
 **`--force` 和 `--allow-secrets` 刻意不进 GUI。** 这两个开关真能丢数据或把凭据推进 git，误点的代价比在终端里敲错命令高得多。GUI 遇到这类错误时，会按错误分类把该敲的命令直接显示出来让你复制。其余破坏性操作（纳管、退出纳管、清理备份、安装更新）走确认对话框。
 
+**`--dry-run` 也不进 GUI。** 纳管确认框本身就是预演，而且它列的是 `cloudot show` 拿到的**真实路径清单**（不是一句笼统的「会把配置移进 store」）—— 再加一个预演开关是重复。`show` 取不到时清单为空、退回通用文案，不阻塞操作。
+
 **自动只读、手动写。** 同步永远要你点。
 
 **GUI 自更新是下载 DMG 替换自己**，不判断安装来源、不在界面里跑 brew。版本发现走
@@ -230,9 +259,9 @@ SF Symbol，菜单栏和 Finder 里认的是同一个东西。刷新中和同步
 ## 测试
 
 ```bash
-cargo test              # 66 个 Rust 单元测试
-./e2e.sh                # 40 项端到端断言
-apps/Cloudot/test.sh    # Swift 测试（契约 + 菜单栏图标 + 自更新；64 个，5 个默认跳过）
+cargo test              # 73 个 Rust 单元测试
+./e2e.sh                # 80 项端到端断言
+apps/Cloudot/test.sh    # Swift 测试（契约 + 菜单栏图标 + 自更新；72 个，5 个默认跳过）
 ```
 
 `e2e.sh` 在 `/tmp/cloudot-e2e` 下用假 `HOME` 模拟两台机器 + 一个 bare remote，完全不碰真实的 `~/.config` 和 `~/.cloudot`。覆盖：
@@ -241,8 +270,10 @@ apps/Cloudot/test.sh    # Swift 测试（契约 + 菜单栏图标 + 自更新；
 - 软链被实体文件顶掉后的拒绝覆盖与 `--force` 恢复
 - **回归**：跨机器 unadopt 后的悬空软链自愈；修不好时必须报警而不是装作没事
 - **回归**：rebase 冲突自动回滚，实时配置不被冲突标记污染；`resolve --theirs/--ours`；未 init 的 status 成功返回
+- **回归**：`--dry-run` 一个字节都不写（逐命令验文件系统、manifest、links.toml 均未变），不支持的命令明确报 `unsupported`
 - `add` 中途失败整体回滚，manifest 与 links.toml 均不被写脏
 - 凭据门禁拦下、报告不回显凭据值、`--allow-secrets` 放行、`doctor` 持续报错
+- `show` 列出目标与 store 位置、带链接状态、未 init 也能用
 - store 的 `.gitignore` 生效、备份盘点与 prune
 
 `CLOUDOT_HOME` 覆盖 `$HOME`，`CLOUDOT_ROOT` 单独覆盖 `~/.cloudot`——都只为测试隔离，正常使用不需要设置。单元测试走 `Layout::with_home()` 而不是环境变量，因为环境变量是进程全局的，并行测试会互相干扰。

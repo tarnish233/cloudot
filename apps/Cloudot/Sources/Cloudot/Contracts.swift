@@ -217,6 +217,36 @@ struct AppListing: Decodable, Identifiable {
     let managed: Bool
 }
 
+// MARK: - show
+
+/// `cloudot show <app>`：一个应用的定义 + 每个路径的当前状态。
+///
+/// 纳管前用它回答「会动我哪些文件」—— 确认框里那份清单就来自这里。
+struct ShowResult: Decodable {
+    let id: String
+    let name: String
+    let detected: Bool
+    let managed: Bool
+    let adoptedBy: String?
+    let detect: [String]
+    let paths: [ShowPath]
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, detected, managed, detect, paths
+        case adoptedBy = "adopted_by"
+    }
+}
+
+struct ShowPath: Decodable, Identifiable {
+    let target: String
+    /// store 内相对位置。算不出来（家目录之外等）时为 nil，那种路径纳管不了。
+    let store: String?
+    let state: LinkState
+    let exists: Bool
+
+    var id: String { target }
+}
+
 // MARK: - backups
 
 struct BackupSet: Decodable {

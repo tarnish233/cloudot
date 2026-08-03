@@ -24,7 +24,10 @@ struct AppsPane: View {
                                     Label(app.name, systemImage: "app.dashed")
                                     Spacer()
                                     Button("同步") {
-                                        model.pending = .adopt(id: app.id, name: app.name)
+                                        // 先拉一次 show 拿到真实路径，确认框才能列出会动哪些文件
+                                        Task {
+                                            await model.requestAdopt(id: app.id, name: app.name)
+                                        }
                                     }
                                     .disabled(model.isBusy)
                                 }

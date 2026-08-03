@@ -264,9 +264,111 @@ for s in 20200101-000000 20200102-000000 20200103-000000; do
   printf 'old\n' > "$A/.cloudot/backups/$s/.config/ghostty/config"
 done
 "$CLOUDOT" backups | grep -q '共 ' && pass "backups 能盘点" || fail "backups 盘点失败"
+"$CLOUDOT" backups prune --keep 1 --dry-run >/dev/null \
+  && pass "prune --dry-run 执行成功" || fail "prune --dry-run 失败"
+[ "$("$CLOUDOT" backups --json | grep -c '"stamp"')" -ge 3 ] \
+  && pass "prune --dry-run 一份都没真删" || fail "prune --dry-run 删了东西！"
 "$CLOUDOT" backups prune --keep 1 >/dev/null && pass "prune 执行成功" || fail "prune 失败"
 [ "$("$CLOUDOT" backups --json | grep -c '"stamp"')" = 1 ] \
   && pass "只留下 1 份" || fail "保留份数不对"
+
+# ─────────────────────────────────────────────── 预演与 show
+# --dry-run 唯一的承诺就是「什么都不动」。一旦它偷偷改了东西，用户对它的
+# 信任就没了 —— 所以这里逐个写命令验文件系统与 manifest/links.toml 都没变。
+section "--dry-run 必须一个字节都不写"
+reset_pair
+export CLOUDOT_HOME="$A"
+# 命令输出存到 BASE 之外：reset_pair 会 rm -rf "$BASE"
+OUT=$(mktemp -d)
+trap 'rm -rf "$OUT"' EXIT
+
+# add：本机有 fish 配置就拿它试，没有就造一个自定义 adopter
+mkdir -p "$A/.config/dryapp"
+printf 'k = v\n' > "$A/.config/dryapp/conf"
+cat > "$A/.cloudot/adopters/dryapp.toml" <<'TOML'
+id = "dryapp"
+name = "Dry App"
+detect = ["~/.config/dryapp/conf"]
+[[paths]]
+path = "~/.config/dryapp/conf"
+TOML
+
+MANIFEST_BEFORE=$(cat "$A/.cloudot/store/manifest.toml")
+LINKS_BEFORE=$(cat "$A/.cloudot/links.toml" 2>/dev/null || echo "")
+
+"$CLOUDOT" add dryapp --dry-run > "$OUT/add-dry.txt" 2>&1 \
+  && pass "add --dry-run 成功退出" || fail "add --dry-run 失败：$(cat "${OUT}/add-dry.txt")"
+grep -q '移入 store 并建链' "$OUT/add-dry.txt" \
+  && pass "add --dry-run 报出了将做的动作" || fail "add --dry-run 没报动作"
+grep -q '预演' "$OUT/add-dry.txt" \
+  && pass "add --dry-run 明确说了这是预演" || fail "预演提示缺失"
+[ ! -L "$A/.config/dryapp/conf" ] && pass "add --dry-run 没把本地文件换成软链" \
+  || fail "add --dry-run 建了软链！"
+[ ! -e "$A/.cloudot/store/files/.config/dryapp/conf" ] \
+  && pass "add --dry-run 没往 store 写东西" || fail "add --dry-run 写了 store！"
+[ "$(cat "$A/.cloudot/store/manifest.toml")" = "$MANIFEST_BEFORE" ] \
+  && pass "add --dry-run 没动 manifest" || fail "manifest 被改了！"
+[ "$(cat "$A/.cloudot/links.toml" 2>/dev/null || echo "")" = "$LINKS_BEFORE" ] \
+  && pass "add --dry-run 没动 links.toml" || fail "links.toml 被改了！"
+
+# apply：先把软链弄坏，预演应报「会建链」但不真建
+rm "$A/.config/ghostty/config"
+"$CLOUDOT" apply --dry-run > "$OUT/apply-dry.txt" 2>&1
+grep -q '会建链' "$OUT/apply-dry.txt" \
+  && pass "apply --dry-run 报出会建链" || fail "apply --dry-run 没报会建链"
+[ ! -e "$A/.config/ghostty/config" ] \
+  && pass "apply --dry-run 没真的建链" || fail "apply --dry-run 建了链！"
+"$CLOUDOT" apply >/dev/null 2>&1   # 修回来，后面还要用
+
+# sync：改配置后预演，应报「会提交」但工作树仍然脏
+printf 'theme = dryrun\n' > "$A/.config/ghostty/config"
+"$CLOUDOT" sync --dry-run > "$OUT/sync-dry.txt" 2>&1
+grep -q '会提交' "$OUT/sync-dry.txt" \
+  && pass "sync --dry-run 报出会提交" || fail "sync --dry-run 没报会提交"
+grep -q '不联网' "$OUT/sync-dry.txt" \
+  && pass "sync --dry-run 说明了不联网" || fail "缺少不联网说明"
+[ -n "$(git -C "$A/.cloudot/store" status --porcelain)" ] \
+  && pass "sync --dry-run 没有提交改动" || fail "sync --dry-run 提交了！"
+
+# unadopt：预演不能把软链换回实体文件
+"$CLOUDOT" unadopt ghostty --dry-run > "$OUT/unadopt-dry.txt" 2>&1
+grep -q '会还原成实体文件' "$OUT/unadopt-dry.txt" \
+  && pass "unadopt --dry-run 报出会还原" || fail "unadopt --dry-run 没报还原"
+[ -L "$A/.config/ghostty/config" ] \
+  && pass "unadopt --dry-run 软链还在" || fail "unadopt --dry-run 真的解链了！"
+grep -q ghostty "$A/.cloudot/store/manifest.toml" \
+  && pass "unadopt --dry-run 没动 manifest" || fail "manifest 里的条目被删了！"
+
+# 不支持预演的命令要明确拒绝，不能装作成功
+"$CLOUDOT" --json init --dry-run 2>&1 | grep -qE '"kind"[[:space:]]*:[[:space:]]*"unsupported"' \
+  && pass "init --dry-run 报 unsupported" || fail "init --dry-run 没有明确拒绝"
+"$CLOUDOT" --json resolve --theirs --dry-run 2>&1 \
+  | grep -qE '"kind"[[:space:]]*:[[:space:]]*"unsupported"' \
+  && pass "resolve --dry-run 报 unsupported" || fail "resolve --dry-run 没有明确拒绝"
+
+# 只读命令收到 --dry-run 应静默忽略
+"$CLOUDOT" status --dry-run >/dev/null 2>&1 \
+  && pass "status 静默忽略 --dry-run" || fail "status 因 --dry-run 失败"
+
+section "show 报出会动哪些文件"
+export CLOUDOT_HOME="$A"
+"$CLOUDOT" show ghostty > "$OUT/show.txt" 2>&1 \
+  && pass "show 成功退出" || fail "show 失败"
+grep -q '~/.config/ghostty/config' "$OUT/show.txt" \
+  && pass "show 列出了目标路径" || fail "show 没列出目标路径"
+grep -q 'files/.config/ghostty/config' "$OUT/show.txt" \
+  && pass "show 列出了 store 内位置" || fail "show 没列 store 位置"
+"$CLOUDOT" --json show ghostty | grep -qE '"schema"[[:space:]]*:[[:space:]]*"cloudot.show/v1"' \
+  && pass "show 的 JSON schema 正确" || fail "show schema 不对"
+"$CLOUDOT" --json show ghostty | grep -qE '"state"[[:space:]]*:[[:space:]]*"linked"' \
+  && pass "show 带每个路径的链接状态" || fail "show 缺链接状态"
+"$CLOUDOT" --json show nope 2>&1 | grep -qE '"kind"[[:space:]]*:[[:space:]]*"unknown_app"' \
+  && pass "show 未知应用报 unknown_app" || fail "show 未知应用分类不对"
+# 未 init 也要能看定义 —— 用户装完第一件事就是想知道会动什么
+FRESH="$OUT/fresh-home"
+mkdir -p "$FRESH"
+CLOUDOT_HOME="$FRESH" "$CLOUDOT" show ghostty >/dev/null 2>&1 \
+  && pass "未 init 也能 show" || fail "未 init 时 show 失败"
 
 section "结果"
 if [ "$FAILED" = 0 ]; then printf '\033[32m全部通过\033[0m\n'; else printf '\033[31m有失败项\033[0m\n'; fi

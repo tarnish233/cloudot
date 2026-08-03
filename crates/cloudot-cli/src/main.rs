@@ -37,6 +37,15 @@ struct Cli {
     /// 以 JSON 输出（含错误）；GUI 与 Agent 用这个模式
     #[arg(long, global = true)]
     json: bool,
+
+    /// 只报告将会发生什么，不动任何文件、不碰 git
+    ///
+    /// 支持 add / apply / sync / unadopt / backups prune。
+    /// 只读命令（status / doctor / apps / show）收到它会静默忽略 —— 它们本来就不写盘。
+    /// init 与 resolve 不支持：前者是「什么都还没有」，后者用户已经看过 diff 才选边。
+    #[arg(long, global = true)]
+    dry_run: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -87,6 +96,11 @@ enum Command {
     },
     /// 列出所有已知应用定义及其检测/纳管状态
     Apps,
+    /// 看一个应用的定义与当前状态：会动哪些文件、现在链好了没
+    Show {
+        /// 应用 id，如 ghostty
+        app: String,
+    },
     /// 盘点或清理 ~/.cloudot/backups
     Backups {
         #[command(subcommand)]
@@ -155,6 +169,29 @@ fn emit<T: Serialize>(schema: &str, result: &T) -> Result<()> {
 fn run(cli: &Cli) -> Result<ExitCode> {
     let layout = Layout::discover()?;
     let json = cli.json;
+    let dry_run = cli.dry_run;
+
+    // 不支持预演的写命令要明确说清，别让用户以为「什么都没发生 = 预演成功了」。
+    if dry_run {
+        match &cli.command {
+            Command::Init { .. } => {
+                return Err(cloudot_core::tagged(
+                    cloudot_core::ErrorKind::Unsupported,
+                    "init 不支持 --dry-run：它建的就是 ~/.cloudot 本身，没有可预演的既有状态。\n\
+                     它可以重复执行，直接跑即可。",
+                ));
+            }
+            Command::Resolve { .. } => {
+                return Err(cloudot_core::tagged(
+                    cloudot_core::ErrorKind::Unsupported,
+                    "resolve 不支持 --dry-run：选边之前该看的是 diff，冲突时 `cloudot sync` \
+                     已经把每个文件的 diff 打出来了（GUI 里是冲突面板）。",
+                ));
+            }
+            // 只读命令：静默忽略，它们本来就不写盘
+            _ => {}
+        }
+    }
 
     match &cli.command {
         Command::Init { remote, device } => {
@@ -201,7 +238,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             }
             let mut outcomes = Vec::new();
             for app in apps {
-                let out = ops::add(&layout, app, *force, *allow_secrets)?;
+                let out = ops::add(&layout, app, *force, *allow_secrets, dry_run)?;
                 if !json {
                     print_add(&out);
                 }
@@ -209,6 +246,8 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             }
             if json {
                 emit(ops::ADD_SCHEMA, &outcomes)?;
+            } else if dry_run {
+                print_dry_run_footer();
             } else if cloudot_core::Config::load(&layout)?.remote.is_some() {
                 println!("\n跑 `cloudot sync` 推到 remote。");
             } else {
@@ -221,14 +260,17 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         }
 
         Command::Apply { force } => {
-            let out = ops::apply(&layout, *force)?;
+            let out = ops::apply(&layout, *force, dry_run)?;
             if json {
                 emit(ops::APPLY_SCHEMA, &out)?;
             } else if out.items.is_empty() && out.healed.is_empty() {
                 println!("manifest 里没有任何纳管条目。");
             } else {
                 print_heal(&out.healed);
-                print_apply(&out.items);
+                print_apply(&out.items, dry_run);
+                if dry_run {
+                    print_dry_run_footer();
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -244,9 +286,11 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         }
 
         Command::Sync { message } => {
-            let out = ops::sync(&layout, message.as_deref())?;
+            let out = ops::sync(&layout, message.as_deref(), dry_run)?;
             if json {
                 emit(ops::SYNC_SCHEMA, &out)?;
+            } else if dry_run {
+                print_sync_dry_run(&out);
             } else {
                 match &out.commit {
                     Some(c) => println!("  ✓ 已提交 {c}"),
@@ -276,16 +320,22 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                 if !out.applied.healed.is_empty() || changed {
                     println!("\n落地：");
                     print_heal(&out.applied.healed);
-                    print_apply(&out.applied.items);
+                    print_apply(&out.applied.items, false);
                 }
             }
             Ok(ExitCode::SUCCESS)
         }
 
         Command::Unadopt { app } => {
-            let out = ops::unadopt(&layout, app)?;
+            let out = ops::unadopt(&layout, app, dry_run)?;
             if json {
                 emit(ops::UNADOPT_SCHEMA, &out)?;
+            } else if dry_run {
+                println!("{} 将退出纳管", out.name);
+                for t in &out.restored {
+                    println!("  → {t} 会还原成实体文件");
+                }
+                print_dry_run_footer();
             } else {
                 println!("{} 已退出纳管", out.name);
                 for t in &out.restored {
@@ -348,6 +398,16 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
 
+        Command::Show { app } => {
+            let out = ops::show(&layout, app)?;
+            if json {
+                emit(ops::SHOW_SCHEMA, &out)?;
+            } else {
+                print_show(&out);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+
         Command::Resolve { theirs, ours } => {
             let side = match (*theirs, *ours) {
                 (true, false) => ops::ResolveSide::Theirs,
@@ -367,7 +427,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                         );
                         if let Some(applied) = &out.applied {
                             print_heal(&applied.healed);
-                            print_apply(&applied.items);
+                            print_apply(&applied.items, false);
                         }
                     }
                     ops::ResolveSide::Ours => {
@@ -408,11 +468,26 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                     }
                 }
                 Some(BackupAction::Prune { keep, older_than }) => {
-                    let out = backups::prune(&layout, *keep, *older_than)?;
+                    let out = backups::prune(&layout, *keep, *older_than, dry_run)?;
                     if json {
                         emit(backups::SCHEMA, &out)?;
                     } else if out.removed.is_empty() {
                         println!("没有需要清理的备份（保留 {keep} 份）。");
+                    } else if dry_run {
+                        for e in &out.removed {
+                            println!(
+                                "  → 会删除 {:<18} {}",
+                                e.stamp,
+                                backups::human_bytes(e.bytes)
+                            );
+                        }
+                        println!(
+                            "\n会清理 {} 份，释放 {}，保留 {} 份。",
+                            out.removed.len(),
+                            backups::human_bytes(out.freed_bytes),
+                            out.kept
+                        );
+                        print_dry_run_footer();
                     } else {
                         for e in &out.removed {
                             println!("  已删除 {:<18} {}", e.stamp, backups::human_bytes(e.bytes));
@@ -433,6 +508,11 @@ fn run(cli: &Cli) -> Result<ExitCode> {
 
 // ────────────────────────────────────────────── 人类可读输出
 
+/// 预演的收尾提示。每条预演输出都要有 —— 不然「什么都没变」看起来像操作失败了。
+fn print_dry_run_footer() {
+    println!("\n以上是预演（--dry-run），没有动任何文件。去掉这个开关即真正执行。");
+}
+
 fn print_add(out: &ops::AddOutcome) {
     println!("{} ({})", out.name, out.id);
     for f in &out.files {
@@ -441,14 +521,103 @@ fn print_add(out: &ops::AddOutcome) {
             AdoptAction::LinkedFromStore => "从 store 建链",
             AdoptAction::MovedIntoStore => "移入 store 并建链",
         };
-        println!("  ✓ {} → {}  [{}]", f.target, f.store, verb);
+        // 预演里 ✓ 会让人误以为已经做了
+        let mark = if out.dry_run { "→" } else { "✓" };
+        println!("  {mark} {} → {}  [{}]", f.target, f.store, verb);
         if let Some(b) = &f.backup {
             println!("    备份 {}", b.display());
         }
     }
+    if out.dry_run {
+        return;
+    }
     match &out.commit {
         Some(c) => println!("  提交 {c}"),
         None => println!("  （无需提交）"),
+    }
+}
+
+/// `sync --dry-run` 的报告。**刻意不联网**，所以只说三件本地能确定的事。
+fn print_sync_dry_run(out: &ops::SyncOutcome) {
+    match out.would_commit.as_deref() {
+        Some([]) | None => println!("  · 无本地改动可提交"),
+        Some(files) => {
+            println!("  → 会提交 {} 处改动：", files.len());
+            for f in files {
+                println!("      {f}");
+            }
+        }
+    }
+
+    match out.behind {
+        Some(0) => println!("  · 本地缓存显示没有落后远端"),
+        Some(n) => println!("  → 本地缓存显示落后远端 {n} 个提交，会拉取"),
+        None => println!("  · 还没有 upstream，无从比较"),
+    }
+    // 说清这个数字的来源，否则用户会以为它是当下的真实差异
+    println!("    （预演不联网，以上落后数取自上次同步时缓存的远端状态）");
+
+    match &out.remote {
+        Some(r) => println!("  → 会推送到 {r}"),
+        None => println!("  · 未配 remote，不会推送"),
+    }
+
+    let changed = out
+        .applied
+        .items
+        .iter()
+        .any(|i| i.action != ApplyAction::AlreadyLinked);
+    if !out.applied.healed.is_empty() || changed {
+        println!("\n落地：");
+        print_heal(&out.applied.healed);
+        print_apply(&out.applied.items, true);
+    }
+    print_dry_run_footer();
+}
+
+/// `show <app>` 的报告：定义 + 当前状态。
+fn print_show(out: &ops::ShowOutcome) {
+    println!("{} ({})", out.name, out.id);
+    println!(
+        "  本机     {}",
+        if out.detected {
+            "已检测到"
+        } else {
+            "未检测到"
+        }
+    );
+    match &out.adopted_by {
+        Some(device) => println!("  纳管     是（由 {device} 纳管）"),
+        None => println!("  纳管     否"),
+    }
+
+    println!("\n检测路径（任一存在即视为已装）：");
+    for d in &out.detect {
+        println!("  {d}");
+    }
+
+    println!("\n会同步这些文件：");
+    for p in &out.paths {
+        let mark = if p.state.is_ok() { "✓" } else { "·" };
+        println!("  {mark} {}", p.target);
+        match &p.store {
+            Some(store) => println!("      store    {store}"),
+            None => println!("      store    （算不出位置，这个路径纳管不了）"),
+        }
+        // 未纳管时 store 里当然没有内容，直接抄 LinkState 的措辞会像在报故障
+        let state = if !out.managed {
+            match p.exists {
+                true => "本机有这份文件，纳管后会移进 store 并建软链",
+                false => "本机还没有这份文件，纳管后会从 store 建链（若远端有）",
+            }
+        } else {
+            p.state.describe()
+        };
+        println!("      当前     {state}");
+    }
+    if !out.managed {
+        println!("\n还没纳管。`cloudot add {}` 会做上面这些事；", out.id);
+        println!("加 --dry-run 可以先看一遍具体动作（含备份路径与凭据检查）。");
     }
 }
 
@@ -504,13 +673,17 @@ fn print_status(st: &status::Status) {
     }
 }
 
-fn print_apply(items: &[ops::ApplyItem]) {
+/// 落地结果。`dry_run` 时把「已做」的文案换成「将做」——
+/// 同一份数据两种读法，靠这里区分，而不是给 `ApplyAction` 加变体。
+fn print_apply(items: &[ops::ApplyItem], dry_run: bool) {
     for i in items {
-        let (mark, verb) = match i.action {
-            ApplyAction::AlreadyLinked => ("·", "已链接"),
-            ApplyAction::Linked => ("✓", "已建链"),
-            ApplyAction::Replaced => ("✓", "已用 store 版本覆盖"),
-            ApplyAction::Skipped => ("!", "跳过"),
+        let (mark, verb) = match (i.action, dry_run) {
+            (ApplyAction::AlreadyLinked, _) => ("·", "已链接，无需改动"),
+            (ApplyAction::Linked, false) => ("✓", "已建链"),
+            (ApplyAction::Linked, true) => ("→", "会建链"),
+            (ApplyAction::Replaced, false) => ("✓", "已用 store 版本覆盖"),
+            (ApplyAction::Replaced, true) => ("→", "会备份本地那份，再用 store 版本覆盖"),
+            (ApplyAction::Skipped, _) => ("!", "跳过"),
         };
         println!("  {mark} {:<34} {verb}", i.target);
         if let Some(b) = &i.backup {

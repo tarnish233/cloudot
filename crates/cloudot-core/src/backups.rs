@@ -66,6 +66,9 @@ pub struct PruneOutcome {
     pub removed: Vec<BackupEntry>,
     pub kept: usize,
     pub freed_bytes: u64,
+    /// 这次是预演，什么都没真的删。
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 /// 删除多余的备份。
@@ -73,7 +76,12 @@ pub struct PruneOutcome {
 /// 一份备份只有在**同时**满足「不在最近 `keep` 份之内」和「早于 `older_than_days`
 /// （若指定）」时才会被删。两个条件取交集而不是并集，是为了让加了天数限制之后
 /// 只会删得更少、不会更多。
-pub fn prune(layout: &Layout, keep: usize, older_than_days: Option<u64>) -> Result<PruneOutcome> {
+pub fn prune(
+    layout: &Layout,
+    keep: usize,
+    older_than_days: Option<u64>,
+    dry_run: bool,
+) -> Result<PruneOutcome> {
     let set = list(layout)?;
     let cutoff =
         older_than_days.map(|days| chrono::Local::now() - chrono::Duration::days(days as i64));
@@ -92,8 +100,10 @@ pub fn prune(layout: &Layout, keep: usize, older_than_days: Option<u64>) -> Resu
                 _ => continue,
             }
         }
-        let dir = layout.backups().join(&entry.stamp);
-        fs::remove_dir_all(&dir).with_context(|| format!("删除备份 {} 失败", dir.display()))?;
+        if !dry_run {
+            let dir = layout.backups().join(&entry.stamp);
+            fs::remove_dir_all(&dir).with_context(|| format!("删除备份 {} 失败", dir.display()))?;
+        }
         freed_bytes += entry.bytes;
         removed.push(entry.clone());
     }
@@ -102,6 +112,7 @@ pub fn prune(layout: &Layout, keep: usize, older_than_days: Option<u64>) -> Resu
         kept: set.entries.len() - removed.len(),
         freed_bytes,
         removed,
+        dry_run,
     })
 }
 
@@ -191,7 +202,7 @@ mod tests {
             make_backup(&layout, stamp, "x");
         }
 
-        let out = prune(&layout, 1, None).unwrap();
+        let out = prune(&layout, 1, None, false).unwrap();
         assert_eq!(out.removed.len(), 2);
         assert_eq!(out.kept, 1);
         assert_eq!(list(&layout).unwrap().entries[0].stamp, "20260301-000000");
@@ -202,7 +213,7 @@ mod tests {
         let home = TempHome::new("bk-noop");
         let layout = home.layout();
         make_backup(&layout, "20260101-000000", "x");
-        let out = prune(&layout, DEFAULT_KEEP, None).unwrap();
+        let out = prune(&layout, DEFAULT_KEEP, None, false).unwrap();
         assert!(out.removed.is_empty());
     }
 
@@ -216,7 +227,7 @@ mod tests {
         make_backup(&layout, &recent, "new");
 
         // keep=0 但要求「早于 365 天」：只有那份 2020 的该走
-        let out = prune(&layout, 0, Some(365)).unwrap();
+        let out = prune(&layout, 0, Some(365), false).unwrap();
         assert_eq!(out.removed.len(), 1);
         assert_eq!(out.removed[0].stamp, "20200101-000000");
         assert_eq!(list(&layout).unwrap().entries.len(), 1);
@@ -227,8 +238,39 @@ mod tests {
         let home = TempHome::new("bk-badstamp");
         let layout = home.layout();
         make_backup(&layout, "手动备份", "x");
-        let out = prune(&layout, 0, Some(1)).unwrap();
+        let out = prune(&layout, 0, Some(1), false).unwrap();
         assert!(out.removed.is_empty(), "看不懂时间戳就该保守留着");
+    }
+
+    /// 预演要报出「会删哪些」，但一份都不能真删。
+    ///
+    /// 备份是孤儿自愈的兜底数据源，预演误删等于把兜底也删了。
+    #[test]
+    fn dry_run_reports_but_removes_nothing() {
+        let home = TempHome::new("bk-dry");
+        let layout = home.layout();
+        for stamp in ["20260101-000000", "20260201-000000", "20260301-000000"] {
+            make_backup(&layout, stamp, "x");
+        }
+
+        let out = prune(&layout, 1, None, true).unwrap();
+        assert!(out.dry_run);
+        assert_eq!(out.removed.len(), 2, "该报出会删两份");
+        assert_eq!(out.kept, 1);
+        assert_eq!(
+            list(&layout).unwrap().entries.len(),
+            3,
+            "预演不该真删任何备份"
+        );
+
+        // 同样的参数真跑一遍，结论必须一致
+        let real = prune(&layout, 1, None, false).unwrap();
+        assert_eq!(
+            real.removed.iter().map(|e| &e.stamp).collect::<Vec<_>>(),
+            out.removed.iter().map(|e| &e.stamp).collect::<Vec<_>>(),
+            "预演和真跑该删的应该是同一批"
+        );
+        assert_eq!(real.freed_bytes, out.freed_bytes);
     }
 
     #[test]

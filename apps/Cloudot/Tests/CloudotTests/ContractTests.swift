@@ -83,6 +83,53 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(apps.first?.managed ?? false)
     }
 
+    /// `show` 是「纳管前会动哪些文件」的唯一数据源，确认框直接用它的 paths。
+    func testShowDecodes() throws {
+        let show = try decodeOK("show", ShowResult.self)
+        XCTAssertEqual(show.id, "ghostty")
+        XCTAssertTrue(show.detected)
+        XCTAssertTrue(show.managed)
+        XCTAssertEqual(show.adoptedBy, "fixture-machine")
+        XCTAssertFalse(show.detect.isEmpty, "没有 detect 就没法判断装没装")
+
+        let path = try XCTUnwrap(show.paths.first)
+        XCTAssertEqual(path.target, "~/.config/ghostty/config")
+        XCTAssertEqual(path.store, "files/.config/ghostty/config")
+        XCTAssertEqual(path.state, .linked)
+        XCTAssertTrue(path.exists)
+    }
+
+    /// 未纳管时 `adopted_by` 缺席，`store` 也可能算不出来 —— 两者都不能让解码失败。
+    func testShowWithoutAdoptedByDecodes() throws {
+        let json = #"""
+        {"schema":"cloudot.show/v1","ok":true,"result":{
+          "id":"x","name":"X","detected":false,"managed":false,
+          "detect":["~/.config/x/conf"],
+          "paths":[{"target":"~/.config/x/conf","state":"store_missing",
+                    "strategy":"symlink","exists":false}]}}
+        """#
+        let show = try decoder.decode(Envelope<ShowResult>.self, from: Data(json.utf8)).result
+        XCTAssertNil(show.adoptedBy)
+        XCTAssertNil(show.paths.first?.store)
+        XCTAssertFalse(show.paths.first?.exists ?? true)
+    }
+
+    /// 确认框必须把真实路径列进去 —— 之前那版是硬编码文案，一条路径都没有。
+    func testAdoptConfirmationListsRealPaths() {
+        let withPaths = PendingAction.adopt(
+            id: "fish", name: "Fish",
+            paths: ["~/.config/fish/config.fish", "~/.config/fish/conf.d/theme.fish"]
+        )
+        let text = withPaths.explanation
+        XCTAssertTrue(text.contains("~/.config/fish/config.fish"), "确认框没列出路径：\(text)")
+        XCTAssertTrue(text.contains("conf.d/theme.fish"), "多路径应用要全部列出：\(text)")
+
+        // show 拿不到时退回通用文案，不能因此挡住纳管
+        let empty = PendingAction.adopt(id: "fish", name: "Fish", paths: [])
+        XCTAssertFalse(empty.explanation.isEmpty)
+        XCTAssertFalse(empty.explanation.contains("会同步这些文件"))
+    }
+
     func testBackupsDecodes() throws {
         let set = try decodeOK("backups", BackupSet.self)
         // snake_case 的字段名最容易写错，明确验一下

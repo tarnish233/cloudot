@@ -6,14 +6,17 @@ import Observation
 /// `--force` / `--allow-secrets` 这类真能丢数据或泄凭据的开关刻意不进 GUI。
 /// 更新也走这条路：它会把 .app 整个换掉，还得重启进程。
 enum PendingAction: Identifiable {
-    case adopt(id: String, name: String)
+    /// 纳管。`paths` 是 `cloudot show <id>` 拿到的真实路径清单 ——
+    /// 确认框必须说清会动哪些文件，笼统一句「会把配置移进 store」等于没说。
+    /// 取不到时为空数组，文案退回通用说明（不阻塞操作）。
+    case adopt(id: String, name: String, paths: [String])
     case unadopt(id: String, name: String)
     case pruneBackups(keep: Int, willRemove: Int)
     case installUpdate(from: String, to: String)
 
     var id: String {
         switch self {
-        case .adopt(let id, _): "adopt-\(id)"
+        case .adopt(let id, _, _): "adopt-\(id)"
         case .unadopt(let id, _): "unadopt-\(id)"
         case .pruneBackups(let keep, _): "prune-\(keep)"
         case .installUpdate(_, let to): "update-\(to)"
@@ -22,7 +25,7 @@ enum PendingAction: Identifiable {
 
     var title: String {
         switch self {
-        case .adopt(_, let name): "同步 \(name)？"
+        case .adopt(_, let name, _): "同步 \(name)？"
         case .unadopt(_, let name): "停止同步 \(name)？"
         case .pruneBackups: "清理旧备份？"
         case .installUpdate(_, let to): "更新到 \(to)？"
@@ -31,23 +34,26 @@ enum PendingAction: Identifiable {
 
     var explanation: String {
         switch self {
-        case .adopt(_, let name):
-            """
+        case .adopt(_, let name, let paths):
+            let fileList = paths.isEmpty
+                ? ""
+                : "\n\n会同步这些文件：\n" + paths.map { "  \($0)" }.joined(separator: "\n")
+            return """
             会把 \(name) 的配置文件移进 ~/.cloudot/store，原地留一个软链指过去。
-            动手之前会先备份到 ~/.cloudot/backups，之后可以停止同步并还原本地文件。
+            动手之前会先备份到 ~/.cloudot/backups，之后可以停止同步并还原本地文件。\(fileList)
             """
         case .unadopt(_, let name):
-            """
+            return """
             会把 \(name) 的软链换回实体文件，并从 store 和清单里移除。
             本地配置内容不会丢，但之后不再跨机器同步。
             """
         case .pruneBackups(let keep, let willRemove):
-            """
+            return """
             会删掉 \(willRemove) 份旧备份，保留最近 \(keep) 份。
             备份是配置自愈时的兜底数据源，删掉就不可恢复了。
             """
         case .installUpdate(let from, let to):
-            """
+            return """
             会下载 \(to) 的安装包，校验之后替换掉当前这个 Cloudot.app（现在是 \(from)）。
             装完需要重启应用才生效，届时会问你。你的配置和备份不受影响。
             如果是用 Homebrew 装的，brew 那边的版本记录会暂时对不上 —— 下次
@@ -591,6 +597,17 @@ final class AppModel {
         conflict = nil
     }
 
+    /// 请求纳管：先问 CLI「会动哪些文件」，再弹确认框。
+    ///
+    /// 多一次进程调用换来确认框里的真实路径清单 —— 纳管会移动用户的配置文件，
+    /// 让他在点头之前看见具体是哪几个文件，比一句笼统的说明值得。
+    /// `show` 失败不阻塞操作：清单为空时确认框退回通用文案。
+    func requestAdopt(id: String, name: String) async {
+        guard let cli else { return }
+        let paths = (try? await cli.show(id))?.paths.map(\.target) ?? []
+        pending = .adopt(id: id, name: name, paths: paths)
+    }
+
     func apply() async {
         await perform { cli in
             let result = try await cli.apply()
@@ -610,7 +627,7 @@ final class AppModel {
     func confirm(_ action: PendingAction) async {
         pending = nil
         switch action {
-        case .adopt(let id, let name):
+        case .adopt(let id, let name, _):
             await perform(subject: id) { cli in
                 let results = try await cli.add(id)
                 let files = results.flatMap(\.files).map(\.target)

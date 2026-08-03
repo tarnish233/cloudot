@@ -168,6 +168,72 @@ pub fn adopt_file(
     })
 }
 
+/// 预测 [`adopt_file`] 会做什么，但**不动任何文件**。给 `--dry-run` 用。
+///
+/// 必须和 `adopt_file` 的分支结构一一对应（同样的顺序、同样的判据），否则预演
+/// 会骗人 —— 那比没有预演更糟。测试 `plan_matches_real_adopt` 钉住这件事：
+/// 每个分支都跑一遍预测和真做，比对结论。
+///
+/// `Ok(action)` 表示真跑会成功并做出 `action`；`Err` 表示真跑会以同样的分类失败。
+pub fn plan_adopt(
+    layout: &Layout,
+    target: &Path,
+    store: &Path,
+    force: bool,
+) -> Result<AdoptAction> {
+    if let Ok(md) = fs::symlink_metadata(target) {
+        if md.file_type().is_symlink() {
+            let dest = fs::read_link(target).unwrap_or_default();
+            if same_path(&dest, store) {
+                return Ok(AdoptAction::AlreadyLinked);
+            }
+            return Err(crate::tagged(
+                crate::ErrorKind::ForeignSymlink,
+                format!(
+                    "{} 已经是指向 {} 的软链，看起来由别的工具管理，cloudot 不会动它",
+                    layout.contract(target),
+                    dest.display()
+                ),
+            ));
+        }
+        if md.file_type().is_dir() {
+            return Err(crate::tagged(
+                crate::ErrorKind::Unsupported,
+                format!(
+                    "{} 是目录。当前版本只支持单文件纳管（目录整体链接会带上需要排除的运行时文件）",
+                    layout.contract(target)
+                ),
+            ));
+        }
+    }
+
+    let target_exists = fs::symlink_metadata(target).is_ok();
+    let store_exists = fs::symlink_metadata(store).is_ok();
+
+    if store_exists {
+        if target_exists && !force {
+            return Err(crate::tagged(
+                crate::ErrorKind::NeedsForce,
+                format!(
+                    "store 里已有 {} 的内容，而本地也存在一份实体文件。\n\
+                     加 --force 会先把本地那份备份到 ~/.cloudot/backups 再用 store 的版本覆盖。",
+                    layout.contract(target)
+                ),
+            ));
+        }
+        return Ok(AdoptAction::LinkedFromStore);
+    }
+
+    if !target_exists {
+        bail!(
+            "{} 不存在，store 里也没有对应内容，没什么可纳管的",
+            layout.contract(target)
+        );
+    }
+
+    Ok(AdoptAction::MovedIntoStore)
+}
+
 /// 撤销一次 [`adopt_file`]，尽量恢复到调用前的样子。
 ///
 /// 必须按当时实际做了什么来分别处理 —— 特别是 `LinkedFromStore` 那种情况，
@@ -284,6 +350,134 @@ mod tests {
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::create_dir_all(store.parent().unwrap()).unwrap();
         (home, layout, target, store)
+    }
+
+    // ── plan_adopt：预演必须和真做说一样的话 ──────────────────────
+    //
+    // 这是 --dry-run 唯一真正危险的地方：预测和实做走的是两段独立的分支代码，
+    // 一旦漂移，预演就会骗人 —— 那比没有预演更糟（用户会照着假报告做决定）。
+
+    /// 逐个场景比对：`plan_adopt` 的结论 == `adopt_file` 真跑的结果。
+    #[test]
+    fn plan_matches_real_adopt_in_every_branch() {
+        // (标签, 布置现场, force, 期望)
+        type Setup = fn(&Path, &Path);
+        let cases: &[(&str, Setup, bool)] = &[
+            // 本地有、store 空 → MovedIntoStore
+            (
+                "local-only",
+                |t, _s| fs::write(t, "local\n").unwrap(),
+                false,
+            ),
+            // store 有、本地无 → LinkedFromStore
+            (
+                "store-only",
+                |_t, s| fs::write(s, "store\n").unwrap(),
+                false,
+            ),
+            // 两边都有 + force → LinkedFromStore
+            (
+                "both-force",
+                |t, s| {
+                    fs::write(s, "store\n").unwrap();
+                    fs::write(t, "local\n").unwrap();
+                },
+                true,
+            ),
+            // 已经链好 → AlreadyLinked
+            (
+                "already",
+                |t, s| {
+                    fs::write(s, "store\n").unwrap();
+                    std::os::unix::fs::symlink(s, t).unwrap();
+                },
+                false,
+            ),
+        ];
+
+        for (tag, setup, force) in cases {
+            // 预测和真做各用一套独立的假家目录，避免互相影响
+            let (_h1, l1, t1, s1) = fixture(&format!("plan-{tag}"));
+            setup(&t1, &s1);
+            let planned = plan_adopt(&l1, &t1, &s1, *force).expect(tag);
+
+            let (_h2, l2, t2, s2) = fixture(&format!("real-{tag}"));
+            setup(&t2, &s2);
+            let real = adopt_file(&l2, &t2, &s2, "stamp", *force).expect(tag);
+
+            assert_eq!(
+                planned, real.action,
+                "{tag}：预演说 {planned:?}，真做是 {:?}",
+                real.action
+            );
+        }
+    }
+
+    /// 会失败的场景，预演也必须以**同样的分类**失败。
+    ///
+    /// 分类相同很重要：GUI 靠 `kind` 决定给什么引导，预演和真做给出不同引导
+    /// 就等于预演没用。
+    #[test]
+    fn plan_reports_the_same_failures_as_real_adopt() {
+        // 两边都有内容但没 --force → NeedsForce
+        let (_h1, l1, t1, s1) = fixture("plan-needs-force");
+        fs::write(&s1, "store\n").unwrap();
+        fs::write(&t1, "local\n").unwrap();
+        let planned = plan_adopt(&l1, &t1, &s1, false).expect_err("该拒绝");
+        assert_eq!(
+            crate::errors::kind_of(&planned),
+            crate::ErrorKind::NeedsForce
+        );
+
+        let (_h2, l2, t2, s2) = fixture("real-needs-force");
+        fs::write(&s2, "store\n").unwrap();
+        fs::write(&t2, "local\n").unwrap();
+        let real = adopt_file(&l2, &t2, &s2, "stamp", false).expect_err("该拒绝");
+        assert_eq!(crate::errors::kind_of(&real), crate::ErrorKind::NeedsForce);
+
+        // 别的工具管着的软链 → ForeignSymlink
+        let (_h3, l3, t3, s3) = fixture("plan-foreign");
+        fs::write(&s3, "store\n").unwrap();
+        let elsewhere = l3.expand("~/elsewhere");
+        fs::write(&elsewhere, "other\n").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &t3).unwrap();
+        assert_eq!(
+            crate::errors::kind_of(&plan_adopt(&l3, &t3, &s3, false).expect_err("该拒绝")),
+            crate::ErrorKind::ForeignSymlink
+        );
+
+        // 目录 → Unsupported
+        let (_h4, l4, t4, s4) = fixture("plan-dir");
+        fs::write(&s4, "store\n").unwrap();
+        fs::remove_file(&t4).ok();
+        fs::create_dir_all(&t4).unwrap();
+        assert_eq!(
+            crate::errors::kind_of(&plan_adopt(&l4, &t4, &s4, false).expect_err("该拒绝")),
+            crate::ErrorKind::Unsupported
+        );
+    }
+
+    /// 预演绝不能碰任何文件 —— 这是它唯一的承诺。
+    #[test]
+    fn plan_adopt_touches_nothing() {
+        let (_h, layout, target, store) = fixture("plan-readonly");
+        fs::write(&target, "local\n").unwrap();
+
+        plan_adopt(&layout, &target, &store, false).expect("能预测");
+
+        assert!(
+            !fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "预演把本地文件换成软链了"
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "local\n");
+        assert!(!store.exists(), "预演往 store 里写了东西");
+        assert!(
+            !layout.backups().exists(),
+            "预演建了备份目录 —— 备份也是写盘"
+        );
     }
 
     // ── inspect 状态机：五种形态各来一发 ────────────────────────────

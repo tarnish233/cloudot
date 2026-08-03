@@ -13,17 +13,17 @@ cloudot：macOS 配置同步器，用 git 在多台 Mac 之间同步 dotfiles。
 ```bash
 # Rust
 cargo build --release
-cargo test                                    # 66 个单元测试
+cargo test                                    # 73 个单元测试
 cargo test --package cloudot-core secrets     # 按模块名过滤
 cargo test link::tests::adopt_links_from_store_when_local_absent   # 跑单个测试
 cargo install --path crates/cloudot-cli       # 装到 ~/.cargo/bin
 
-./e2e.sh                                      # 40 项端到端断言（假 HOME，不碰真实配置）
+./e2e.sh                                      # 80 项端到端断言（假 HOME，不碰真实配置）
 
 # Swift GUI（在 apps/Cloudot/ 下）
 ./make-app.sh                                 # 构建 GUI + CLI，组装 build/Cloudot.app
 MAKE_DMG=1 ./make-app.sh                      # 顺带打发布用的 DMG + .sha256
-./test.sh                                     # 64 个测试（含 5 个默认跳过：2 截图 + 3 更新 e2e）
+./test.sh                                     # 72 个测试（含 5 个默认跳过：2 截图 + 3 更新 e2e）
 ./test.sh --filter ContractTests              # 跑单个 test class
 swift build                                   # 只编译，不组装 bundle
 ./demo-states.sh                              # 沙盒里走遍菜单栏各状态
@@ -57,6 +57,27 @@ JSON 统一信封，消费方只需要一条解码路径：
 - **`status` 未 init 时返回成功信封 + `initialized: false`**，不要抛 `NotInitialized`——那是写路径的事。GUI 靠这个字段画 Setup 引导，而不是红 banner。
 - **`pull_conflict` 的错误信封带 `conflict` 字段**（`ConflictReport`：文件列表 + 每文件 diff）。GUI 弹选边面板；终端用 `cloudot resolve --theirs|--ours`。冲突时仍先 `rebase --abort`。
 - **`doctor` 有 error 级检查项时以非零码退出，但输出合法的成功信封。** 消费方必须先解信封再看退出码。`CloudotCLI.swift` 就是这么做的，改那里要留住这个顺序。
+
+### 预演（`--dry-run`）
+
+全局开关，照 `--json` 的 `global = true` 挂在 `Cli` 上。几条约束改动前先看懂：
+
+- **`plan_adopt`（`link.rs`）必须和 `adopt_file` 的分支结构一一对应** —— 同样的顺序、同样的判据、同样的错误分类。这两段是独立代码，一旦漂移预演就会骗人，而那比没有预演更糟（用户照着假报告做决定）。`plan_matches_real_adopt_in_every_branch` 和 `plan_reports_the_same_failures_as_real_adopt` 逐分支钉住这件事，加新分支要同时加进去。
+- **校验在预演里照常执行**（detect 门禁、凭据扫描、`is_repo`），只跳过写盘与 git 改动。预演的主要价值就是让校验先说话。
+- **schema 加 `dry_run: bool` 字段，不改 `action` 的语义。** 「已建链」和「将建链」的区别由 CLI 的文案层处理（`print_apply(items, dry_run)`），不给 `ApplyAction` 加变体 —— Swift 侧因此零改动。
+- **`sync --dry-run` 刻意不联网**：不 fetch、不 commit、不 push。落后数取自本地缓存的 `@{upstream}`，输出里必须写明这一点，否则用户会当成当下的真实差异。
+- **仍然加锁。** 不写盘理论上不用锁，但不加锁读到的状态可能正在被另一进程改，报告就不自洽了。注意 `Lock::acquire` 自己会 `create_dir_all(root)` 并创建 lock 文件 —— 这不算破坏性写入。
+- **`init` / `resolve` 不支持，在 CLI 层就报 `Unsupported`**，不要让它们静默走 dry-run 分支：「什么都没发生」看起来会像预演成功了。
+- **`--dry-run` 刻意不进 GUI。** GUI 的确认框本身就是预演（现在会列出 `show` 拿到的真实路径），再加一个开关是重复。
+- 每条预演输出都要有收尾提示（`print_dry_run_footer`），否则「什么都没变」看起来像操作失败。
+
+### `show`
+
+`cloudot show <app>` = adopter 定义 + 每个路径的当前 `LinkState`。纯只读、不加锁、**未 init 也能用**（adopter 定义来自编译进二进制的内置表 + `~/.cloudot/adopters/`，不需要 `config.toml`）。
+
+- 输出用独立的 `ShowOutcome`/`ShowPath`，**不直接序列化 `Adopter`** —— 后者是用户手写的存储格式，和输出契约耦合起来以后不好改（它至今只 derive 了 `Deserialize`）。
+- 未纳管时不要直接抄 `LinkState::describe()`：store 里当然没内容，照抄会显示「store 内容缺失」，像在报故障。CLI 的 `print_show` 按 `managed` 分开措辞。
+- GUI 的纳管确认框（`PendingAction.adopt`）带 `paths`，就是从这里来的。`show` 失败时清单为空、退回通用文案，**不阻塞纳管**。
 
 ### 安全关键路径
 
@@ -116,7 +137,7 @@ Homebrew Cask + GitHub Release 的 DMG（不再发 zip），一条 `brew install
 
 - **Swift fixture 是从真实 CLI 抓下来的输出，不是手写的** —— 手写只能验证「我以为的格式」。重抓：`cloudot --json status > apps/Cloudot/Tests/CloudotTests/Fixtures/status.json`。
 - 契约测试里有两条**方向相反**的断言，都是刻意的：未知的**错误分类**降级成 `other`（新分类只影响引导文案），未知的**链接状态**则整体解码失败（新状态可能意味着新的损坏形态，宁可报「输出异常」也不要静默降级成一个看起来正常的值）。
-- `e2e.sh` 在 `/tmp/cloudot-e2e` 下用假 HOME 模拟两台机器 + 一个 bare remote。里面有几条是**回归测试**（跨机器 unadopt 后的悬空软链自愈、rebase 冲突自动回滚 + `resolve` 选边、未 init 的 status 信封、`add` 中途失败整体回滚），改相关逻辑时要保证它们仍然通过。
+- `e2e.sh` 在 `/tmp/cloudot-e2e` 下用假 HOME 模拟两台机器 + 一个 bare remote。里面有几条是**回归测试**（跨机器 unadopt 后的悬空软链自愈、rebase 冲突自动回滚 + `resolve` 选边、未 init 的 status 信封、`add` 中途失败整体回滚、`--dry-run` 一个字节都不写），改相关逻辑时要保证它们仍然通过。注意 `reset_pair` 会 `rm -rf "$BASE"`，命令输出要存到 `$BASE` 之外（`--dry-run` 那段用的是 `mktemp -d`）。
 
 ## 注意
 

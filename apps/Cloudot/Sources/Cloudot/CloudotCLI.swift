@@ -81,6 +81,11 @@ struct CloudotCLI: Sendable {
         try await call(["apps"], as: [AppListing].self)
     }
 
+    /// 一个应用的定义与当前状态。纯只读，未 init 也能用。
+    func show(_ appID: String) async throws -> ShowResult {
+        try await call(["show", appID], as: ShowResult.self)
+    }
+
     func backups() async throws -> BackupSet {
         try await call(["backups"], as: BackupSet.self)
     }

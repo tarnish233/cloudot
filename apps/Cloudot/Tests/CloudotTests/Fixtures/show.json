@@ -1,0 +1,24 @@
+{
+  "ok": true,
+  "result": {
+    "adopted_by": "fixture-machine",
+    "detect": [
+      "~/.config/ghostty/config",
+      "/Applications/Ghostty.app"
+    ],
+    "detected": true,
+    "id": "ghostty",
+    "managed": true,
+    "name": "Ghostty",
+    "paths": [
+      {
+        "exists": true,
+        "state": "linked",
+        "store": "files/.config/ghostty/config",
+        "strategy": "symlink",
+        "target": "~/.config/ghostty/config"
+      }
+    ]
+  },
+  "schema": "cloudot.show/v1"
+}
