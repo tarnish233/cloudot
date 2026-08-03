@@ -152,9 +152,14 @@ pub fn add(
     let mut records = LinkRecords::load(layout)?;
     let stamp = timestamp();
 
-    let store_has_any = ad.paths.iter().any(|p| {
+    // glob 在这里一次性展开成具体文件，后面的探测、凭据扫描、纳管循环都消费
+    // 同一份清单 —— 否则三处各扫一次目录，中间有文件增删就会各说各话。
+    // manifest 里存的仍是展开后的确定清单（见 `Adopter::expand_paths`）。
+    let targets = ad.expand_paths(layout);
+
+    let store_has_any = targets.iter().any(|(path, _)| {
         layout
-            .store_rel_for(&layout.expand(&p.path))
+            .store_rel_for(&layout.expand(path))
             .map(|rel| layout.store_path(&rel).exists())
             .unwrap_or(false)
     });
@@ -169,12 +174,24 @@ pub fn add(
         ));
     }
 
+    // glob 展开后一个文件都不剩：目录在但里面没有匹配的内容，纳管了也什么都不做。
+    // 说清楚比返回一个空的成功结果好 —— 后者看起来像成功了。
+    if targets.is_empty() {
+        return Err(crate::tagged(
+            crate::ErrorKind::NotDetected,
+            format!(
+                "{} 的定义没有匹配到任何文件（检查 adopter 里的 include / exclude）",
+                ad.name
+            ),
+        ));
+    }
+
     // 凭据检查放在动手之前，而且是全部路径一起看：宁可整体拒绝，
     // 也不要纳管了一半才发现有 token 要往 git 里推。
     if !allow_secrets {
         let mut findings = Vec::new();
-        for path in &ad.paths {
-            let target = layout.expand(&path.path);
+        for (path, _) in &targets {
+            let target = layout.expand(path);
             let display = layout.contract(&target);
             if fs::symlink_metadata(&target).is_ok() {
                 findings.extend(secrets::scan_file(&target, &display));
@@ -208,8 +225,8 @@ pub fn add(
     let mut done: Vec<(PathBuf, PathBuf, AdoptReport)> = Vec::new();
     let mut failure: Option<anyhow::Error> = None;
 
-    for path in &ad.paths {
-        let target = layout.expand(&path.path);
+    for (path, strategy) in &targets {
+        let target = layout.expand(path);
         // 路径计算与写入分开：预演要拿到 store 位置和预测结论，但不能动文件。
         let step = layout.store_rel_for(&target).and_then(|store_rel| {
             let store_abs = layout.store_path(&store_rel);
@@ -240,7 +257,7 @@ pub fn add(
                 managed.push(ManagedFile {
                     target: target_repr,
                     store: store_rel,
-                    strategy: path.strategy,
+                    strategy: *strategy,
                 });
                 done.push((target, store_abs, report));
             }
@@ -965,11 +982,13 @@ pub fn show(layout: &Layout, app_id: &str) -> Result<ShowOutcome> {
     let manifest = Manifest::load(layout)?;
     let managed_app = manifest.app(&ad.id);
 
+    // 和 add 走同一条展开路径 —— show 要报的就是「add 会动哪些文件」，
+    // 两边若各自算一遍，glob 的语义一旦有出入，预览就会骗人。
     let paths = ad
-        .paths
-        .iter()
-        .map(|p| {
-            let target = layout.expand(&p.path);
+        .expand_paths(layout)
+        .into_iter()
+        .map(|(path, strategy)| {
+            let target = layout.expand(&path);
             let store_rel = layout.store_rel_for(&target).ok();
             let state = match &store_rel {
                 Some(rel) => link::inspect(&target, &layout.store_path(rel)),
@@ -979,7 +998,7 @@ pub fn show(layout: &Layout, app_id: &str) -> Result<ShowOutcome> {
             ShowPath {
                 target: layout.contract(&target),
                 store: store_rel,
-                strategy: p.strategy,
+                strategy,
                 state,
                 exists: fs::symlink_metadata(&target).is_ok(),
             }

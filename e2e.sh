@@ -286,9 +286,9 @@ detect = ["~/.config/st/conf"]
 [[paths]]
 path = "~/.config/st/conf"
 TOML
-OUT=$("$CLOUDOT" add secretish 2>&1)
-echo "$OUT" | grep -q '像是有凭据' && pass "默认拦下并说明原因" || fail "没拦住"
-echo "$OUT" | grep -q '8f14e45fceea167a5a36dedd4bea2543' && fail "报告里回显了凭据值！" \
+SECRET_OUT=$("$CLOUDOT" add secretish 2>&1)
+echo "$SECRET_OUT" | grep -q '像是有凭据' && pass "默认拦下并说明原因" || fail "没拦住"
+echo "$SECRET_OUT" | grep -q '8f14e45fceea167a5a36dedd4bea2543' && fail "报告里回显了凭据值！" \
   || pass "报告不回显凭据值"
 [ ! -L "$A/.config/st/conf" ] && pass "被拦时没有动文件" || fail "被拦却已经改了文件"
 "$CLOUDOT" add secretish --allow-secrets >/dev/null 2>&1 \
@@ -326,7 +326,8 @@ done
 section "--dry-run 必须一个字节都不写"
 reset_pair
 export CLOUDOT_HOME="$A"
-# 命令输出存到 BASE 之外：reset_pair 会 rm -rf "$BASE"
+# 命令输出存到 BASE 之外：reset_pair 会 rm -rf "$BASE"。
+# `$OUT` 之后一直用到脚本结尾，别拿它接命令输出（曾经和凭据那节的临时变量撞过）。
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 
@@ -417,6 +418,74 @@ FRESH="$OUT/fresh-home"
 mkdir -p "$FRESH"
 CLOUDOT_HOME="$FRESH" "$CLOUDOT" show ghostty >/dev/null 2>&1 \
   && pass "未 init 也能 show" || fail "未 init 时 show 失败"
+
+# ─────────────────────────────────────────────── adopter 的 glob 展开
+# conf.d / functions 这类「常新增文件」的目录用 include/exclude 覆盖，
+# 而不是逐个列。展开发生在 add 时，manifest 里存的仍是具体文件清单。
+section "adopter 的 include/exclude 展开"
+reset_pair
+export CLOUDOT_HOME="$A"
+mkdir -p "$A/.config/gl/conf.d" "$A/.config/gl/gen"
+printf 'hand = 1\n'  > "$A/.config/gl/conf.d/hand.conf"
+printf 'more = 1\n'  > "$A/.config/gl/conf.d/more.conf"
+printf 'tool = 1\n'  > "$A/.config/gl/conf.d/generated.conf"   # 该被 exclude
+printf 'bak\n'       > "$A/.config/gl/conf.d/hand.conf.bak"    # 该被 exclude
+printf 'other = 1\n' > "$A/.config/gl/conf.d/notes.txt"        # 不匹配 include
+mkdir -p "$A/.config/gl/conf.d/nested"
+printf 'deep = 1\n'  > "$A/.config/gl/conf.d/nested/deep.conf" # 不该递归进去
+cat > "$A/.cloudot/adopters/globapp.toml" <<'TOML'
+id = "globapp"
+name = "Glob App"
+detect = ["~/.config/gl/conf.d"]
+[[paths]]
+path    = "~/.config/gl/conf.d"
+include = ["*.conf"]
+exclude = ["generated.conf", "*.bak"]
+TOML
+
+"$CLOUDOT" show globapp > "$OUT/show-glob.txt" 2>&1 \
+  && pass "show 能展开 glob" || fail "show 展开失败"
+grep -q 'conf.d/hand.conf' "$OUT/show-glob.txt" \
+  && pass "show 列出了匹配的文件" || fail "show 没列出匹配的文件"
+grep -q 'generated.conf' "$OUT/show-glob.txt" \
+  && fail "show 列出了被 exclude 的文件" || pass "show 不列被 exclude 的文件"
+
+"$CLOUDOT" add globapp >/dev/null 2>&1 || fail "add globapp 失败"
+STORE_FILES=$(git -C "$A/.cloudot/store" ls-files | grep 'gl/conf.d' || true)
+echo "$STORE_FILES" | grep -q 'hand.conf$' \
+  && pass "hand.conf 已纳管" || fail "hand.conf 没纳管"
+echo "$STORE_FILES" | grep -q 'more.conf$' \
+  && pass "more.conf 已纳管" || fail "more.conf 没纳管"
+echo "$STORE_FILES" | grep -q 'generated.conf' \
+  && fail "exclude 没挡住 generated.conf" || pass "exclude 挡住了 generated.conf"
+echo "$STORE_FILES" | grep -q '\.bak' \
+  && fail "exclude 没挡住 .bak" || pass "exclude 挡住了 .bak"
+echo "$STORE_FILES" | grep -q 'notes.txt' \
+  && fail "不匹配 include 的也被纳管了" || pass "notes.txt 未被纳管"
+echo "$STORE_FILES" | grep -q 'nested/' \
+  && fail "递归进了子目录" || pass "没有递归进子目录"
+
+# 展开在 add 时发生：本机新增文件后要重跑 add 才会带上
+printf 'later = 1\n' > "$A/.config/gl/conf.d/later.conf"
+"$CLOUDOT" status --json | grep -q 'later.conf' \
+  && fail "新文件不该自动出现在 manifest 里" || pass "新文件要重跑 add（展开在 add 时）"
+"$CLOUDOT" add globapp >/dev/null 2>&1 || fail "重跑 add 失败"
+git -C "$A/.cloudot/store" ls-files | grep -q 'later.conf' \
+  && pass "重跑 add 带上了新文件" || fail "重跑 add 没带上新文件"
+
+# include 写错（一个都匹配不上）要明确报错，而不是静默成功
+mkdir -p "$A/.config/nomatch"
+printf 'x\n' > "$A/.config/nomatch/a.txt"
+cat > "$A/.cloudot/adopters/nomatch.toml" <<'TOML'
+id = "nomatch"
+name = "No Match"
+detect = ["~/.config/nomatch"]
+[[paths]]
+path    = "~/.config/nomatch"
+include = ["*.fish"]
+TOML
+"$CLOUDOT" --json add nomatch 2>&1 | grep -qE '"kind"[[:space:]]*:[[:space:]]*"not_detected"' \
+  && pass "一个文件都没匹配到时明确报错" || fail "没匹配到却静默成功了"
 
 section "结果"
 if [ "$FAILED" = 0 ]; then printf '\033[32m全部通过\033[0m\n'; else printf '\033[31m有失败项\033[0m\n'; fi

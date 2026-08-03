@@ -106,13 +106,32 @@ cloudot backups prune --keep 5 --dry-run
 
 **加应用 = 加一个 TOML。** 见 [adopters/ghostty.toml](adopters/ghostty.toml)。逻辑代码不需要改（只需在 `adopter.rs` 的 `BUILTIN` 登记一行）。
 
+**常新增文件的目录用 `include` / `exclude` 覆盖，不逐个列。** `conf.d/`、`functions/` 这类地方你随手就会加个别名或函数，逐文件列意味着每次都要改定义，忘了改就等于没同步。
+
+```toml
+[[paths]]
+path    = "~/.config/fish/conf.d"
+include = ["*.fish"]
+exclude = ["cargo.fish", "homebrew.fish", "uv.env.fish", "*.bak"]
+```
+
+三条刻意的取舍：
+
+- **展开发生在 `add` 时**，manifest 里存的仍是**具体文件清单** —— `apply` / `status` / `doctor` 因此完全不需要知道 glob 的存在，`links.toml` 对账也照旧。代价是本机新增一个 `conf.d/foo.fish` 之后要重跑 `cloudot add fish` 才会纳管它（`cloudot show fish` 能先看会收哪些）。
+- **只匹配单层文件名，不支持递归。** `**` 那种展开会把 `completions/`、`automatic_backups/` 那类运行时目录一起带上，而那正是要避开的。glob 只认 `*` 和 `?`，实现在 `adopter.rs` 里几十行，不引入依赖。
+- **排除规则只在 adopter 里显式列**，core 里没有隐式默认。加一个新工具就在定义里补一行 —— 这样「为什么某个文件没被同步」永远能在定义里查到，而不是藏在代码某处。
+
+一个文件都没匹配到时 `add` 会明确报错（`not_detected`），而不是静默返回一个空的成功结果 —— 后者看起来像成功了。
+
+对比一下：mackup 的 fish 定义是整目录一把梭（`fish/conf.d`、`fish/functions`、`fish/completions`、`fish/fish_variables`），所以会把 fish 自己回写的 `fish_variables` 和工具装的补全一起同步过去。cloudot 拿的是「目录 + 规则」，覆盖面一样，但脏东西挡在门外。
+
 **已纳管应用的注意事项。** 每个 adopter TOML 的注释里写了取舍理由，两处需要特别留意：
 
 | 应用 | 纳管什么 | 注意 |
 |---|---|---|
 | ghostty | `~/.config/ghostty/config` | 只读配置，最安全 |
-| fish | `config.fish` · `conf.d/` 与 `functions/` 下的手写文件 | **不含 `fish_variables`**（fish 自己回写的运行时状态）和 `completions/`（工具自动生成） |
-| karabiner | `karabiner.json` | ⚠️ GUI 保存时是**替换写入**，会顶掉软链。适合「一台编辑、其余只读」；多机都用 GUI 改键位就别纳管 |
+| fish | `config.fish` · `conf.d/*.fish` · `functions/*.fish` | **不含 `fish_variables`**（fish 自己回写的运行时状态）、`completions/`（工具自动生成）、以及 `cargo.fish` / `homebrew.fish` / `uv.env.fish`（工具生成，含本机路径） |
+| karabiner | `karabiner.json` | ⚠️ GUI 保存时是**替换写入**，会顶掉软链。适合「一台编辑、其余只读」；多机都用 GUI 改键位就别纳管。`assets/` 与 `automatic_backups/` 不纳管 |
 | gitpic | `~/.config/gitpic/config.toml` | ⚠️ 默认含 GitHub token，会被凭据门禁拒绝。**先把 token 挪到 `GITPIC_TOKEN` 环境变量**再纳管 |
 
 gitpic 的正确做法（实测只设 `GITPIC_TOKEN` 就能通过 `gitpic doctor`）：
@@ -263,8 +282,8 @@ SF Symbol，菜单栏和 Finder 里认的是同一个东西。刷新中和同步
 ## 测试
 
 ```bash
-cargo test              # 101 个 Rust 单元测试
-./e2e.sh                # 92 项端到端断言
+cargo test              # 110 个 Rust 单元测试
+./e2e.sh                # 102 项端到端断言
 apps/Cloudot/test.sh    # Swift 测试（契约 + 菜单栏图标 + 自更新；72 个，5 个默认跳过）
 ```
 
@@ -278,6 +297,7 @@ apps/Cloudot/test.sh    # Swift 测试（契约 + 菜单栏图标 + 自更新；
 - `add` / `unadopt` 中途失败整体回滚，manifest 与 links.toml 均不被写脏；unadopt 删 store 副本前留备份
 - 凭据门禁拦下、报告不回显凭据值、`--allow-secrets` 放行、`doctor` 持续报错
 - `show` 列出目标与 store 位置、带链接状态、未 init 也能用
+- adopter 的 include/exclude 展开：匹配的收、工具生成的与 .bak 挡住、不递归子目录
 - store 的 `.gitignore` 生效、备份盘点与 prune
 
 `CLOUDOT_HOME` 覆盖 `$HOME`，`CLOUDOT_ROOT` 单独覆盖 `~/.cloudot`——都只为测试隔离，正常使用不需要设置。单元测试走 `Layout::with_home()` 而不是环境变量，因为环境变量是进程全局的，并行测试会互相干扰。

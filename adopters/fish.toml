@@ -1,16 +1,26 @@
 # Fish shell。
 #
-# 只纳管手写的配置，不纳管 fish 自己维护的运行时文件：
+# `conf.d/` 与 `functions/` 用「目录 + include/exclude」覆盖，而不是逐个列文件 ——
+# 这两处是最常新增文件的地方（加个别名、写个函数），逐文件列意味着每次都要改这份
+# 定义，忘了改就等于没同步。展开发生在 `cloudot add` 时，manifest 里存的仍是具体
+# 文件清单，所以本机新增文件后要重跑一次 `add` 才会带上它。
+#
+# 不纳管的东西，以及为什么：
 #
 # - `fish_variables` 不纳管。它是 universal variables 的存储，fish 会在你跑
 #   `set -U`（以及 web 配置界面改主题）时**自行重写**。同步它等于让两台机器
 #   互相覆盖运行时状态，而且 fish 是替换写入，软链会被顶成实体文件。
-# - `completions/` 里多数是工具自己装进去的（本机的 copilot.fish 就是），
-#   跟着机器走比跟着人走更合适，所以也不纳管。
+#   注意 mackup 的 fish 定义**会**同步它 —— 那是它的取舍，不是我们的。
+# - `completions/` 整个不纳管。里面多数是工具自己装进去的（codex.fish、
+#   copilot.fish 之类），跟着机器走比跟着人走更合适。
+# - `conf.d/` 里那些**工具生成的环境注入**（cargo / homebrew / uv）逐个排除。
+#   它们的内容含本机绝对路径（`/opt/homebrew` vs `/usr/local`、rustup 的安装
+#   位置），同步过去在另一台机器上可能指向不存在的地方。装那个工具时它自己会
+#   重新生成，不需要我们搬。
+# - `*.bak` 排除。手动改配置时留下的副本，是过程产物不是配置。
 #
-# `conf.d/` 与 `functions/` 下的文件是逐个列的，不是整目录链接 —— 当前版本
-# 只支持单文件纳管（见 link.rs），而且整目录链接会把上面那些运行时文件一起带上。
-# 新增自定义函数时要在这里补一行。
+# 排除规则只在这里显式列，core 里没有隐式默认 —— 加一个新工具就在这儿补一行，
+# 这样「为什么某个文件没被同步」永远能在定义里查到。
 id   = "fish"
 name = "Fish"
 
@@ -25,9 +35,18 @@ path     = "~/.config/fish/config.fish"
 strategy = "symlink"
 
 [[paths]]
-path     = "~/.config/fish/conf.d/fish_frozen_theme.fish"
+path     = "~/.config/fish/conf.d"
 strategy = "symlink"
+include  = ["*.fish"]
+exclude  = [
+  "cargo.fish",     # rustup 装 cargo 时生成，含本机安装路径
+  "homebrew.fish",  # brew shellenv，Intel 与 Apple Silicon 路径不同
+  "uv.env.fish",    # uv 自己写的环境注入
+  "*.bak",
+]
 
 [[paths]]
-path     = "~/.config/fish/functions/fish_prompt.fish"
+path     = "~/.config/fish/functions"
 strategy = "symlink"
+include  = ["*.fish"]
+exclude  = ["*.bak"]

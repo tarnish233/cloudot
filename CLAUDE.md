@@ -13,12 +13,12 @@ cloudot：macOS 配置同步器，用 git 在多台 Mac 之间同步 dotfiles。
 ```bash
 # Rust
 cargo build --release
-cargo test                                    # 101 个单元测试
+cargo test                                    # 110 个单元测试
 cargo test --package cloudot-core secrets     # 按模块名过滤
 cargo test link::tests::adopt_links_from_store_when_local_absent   # 跑单个测试
 cargo install --path crates/cloudot-cli       # 装到 ~/.cargo/bin
 
-./e2e.sh                                      # 92 项端到端断言（假 HOME，不碰真实配置）
+./e2e.sh                                      # 102 项端到端断言（假 HOME，不碰真实配置）
 
 # Swift GUI（在 apps/Cloudot/ 下）
 ./make-app.sh                                 # 构建 GUI + CLI，组装 build/Cloudot.app
@@ -100,6 +100,12 @@ JSON 统一信封，消费方只需要一条解码路径：
 - **单元测试用 `Layout::with_home()`，不要用 `CLOUDOT_HOME` 环境变量** —— 环境变量是进程全局的，并行测试会互相干扰。`CLOUDOT_HOME` / `CLOUDOT_ROOT` 只给 e2e 和 demo 脚本做隔离用。
 - **manifest 里路径一律存 `~/` 形式**，换机器换用户名都能直接 apply。
 - **加应用 = 往 `adopters/` 放一个 TOML + 在 `adopter.rs` 的 `BUILTIN` 登记一行**（`include_str!` 编译进二进制）。逻辑代码不用改。用户放在 `~/.cloudot/adopters/` 的同 id 定义会覆盖内置。
+- **`AdopterPath` 支持 `include` / `exclude` glob**（目录 + 规则，给 `conf.d/` 这类常新增文件的地方用）。关键约束：
+  - **展开在 `add` 时**（`Adopter::expand_paths`），manifest 里存的仍是具体文件清单 —— `apply` / `status` / `doctor` / `links.toml` 对账都不必知道 glob 存在。别改成 apply 时重扫，那会把 manifest 从「确定的文件清单」变成「规则」，对账逻辑全要跟着改。
+  - **`add` 与 `show` 必须走同一个 `expand_paths`**。show 报的就是「add 会动哪些文件」，两边各算一遍就会骗人。
+  - **只匹配单层文件名，刻意不支持递归**（没有 `**`）。递归会把 `completions/`、`automatic_backups/` 那类运行时目录带上。glob 匹配器是自己写的（`glob_match`，只认 `*` 和 `?`），有边界单测钉住多 `*` 回溯与非 ASCII。
+  - **排除规则只在 adopter TOML 里显式列**，core 里不藏隐式默认 —— 「为什么这个文件没同步」要能在定义里查到。`builtin_glob_rules_are_well_formed` 挡住「写了 exclude 却忘了 include」（那条 exclude 会静默失效）。
+  - 一个文件都没匹配到时 `add` 报 `not_detected`，不返回空的成功结果。
 
 ## SwiftUI GUI
 
