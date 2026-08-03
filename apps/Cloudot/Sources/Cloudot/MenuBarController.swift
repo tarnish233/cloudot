@@ -176,10 +176,12 @@ final class MenuBarController: NSObject {
         showPopoverAnchored()
         // 面板上就有「立即同步」按钮，显示旧状态会自相矛盾（写着「已同步」还让你点同步）。
         // 只拉 status：面板用不到 doctor/apps/backups，而 doctor 单独就要 87ms。
+        //
+        // **不要**在 refresh 后无条件关开 popover 重锚 —— preferredContentSize 会自己
+        // 跟着内容长，关开一次就闪一次。只有真的漂到屏幕角落才抢救（见 reanchorIfDrifted）。
         Task {
             await model.refreshStatusOnly()
-            // status 从 nil → setup/内容会改 preferred size；若锚点丢了就重挂一次
-            self.reanchorPopoverIfNeeded()
+            self.reanchorIfDrifted()
         }
     }
 
@@ -199,9 +201,15 @@ final class MenuBarController: NSObject {
         }
     }
 
-    /// 内容尺寸剧变后，若 popover 还开着就关了再按按钮重锚 —— 防止漂到屏幕角落。
-    private func reanchorPopoverIfNeeded() {
+    /// 锚点丢失时 popover 会掉到屏幕左下角附近。只在这种异常位置才关开重锚，
+    /// 常态尺寸变化交给 `preferredContentSize`，避免每次点开都闪一下。
+    private func reanchorIfDrifted() {
         guard popover.isShown else { return }
+        guard let window = popover.contentViewController?.view.window else { return }
+        let origin = window.frame.origin
+        // 正常贴在菜单栏下方时 y 接近屏幕顶部；漂到 (0,0) 一带才是锚丢了。
+        guard origin.x < 16, origin.y < 16 else { return }
+        diag("popover 漂到 (\(origin.x), \(origin.y))，重锚")
         guard let button = statusItem.button, button.window != nil else { return }
         popover.performClose(nil)
         showPopoverAnchored()

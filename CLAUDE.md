@@ -87,6 +87,7 @@ JSON 统一信封，消费方只需要一条解码路径：
 
 - **不用 `MenuBarExtra`，自己持有 `NSStatusItem`**（`MenuBarController.swift`）。**注意原来的理由已经作废** —— 那时是「动画到不了状态栏，必须逐帧换图」，而图标现在是静态 SF Symbol，别再拿这条当依据。仍然自建是因为还有三件事非拿到 status item 不可：结果反馈那 0.7 秒的临时换图要能精确控制何时换回；tooltip 与辅助功能标签跟着 `headline` 走；点击时顺手拉一次 status（`MenuBarExtra` 没有点击回调）。迁移过去收益为零，不动。
 - **破坏性操作的确认框只由 `MenuBarController` 用 AppKit `NSAlert` 呈现一次**（`PendingActionPresenter`）。不要在 `MenuBarPanel` 和 `MainWindow` 上各挂一份 SwiftUI confirm——主窗 `isReleasedWhenClosed = false`，关窗后仍能再弹一个，锚不到 status item 就落到屏幕左下角。冲突 sheet 只挂主窗口；菜单栏 sync 撞车时由 Controller 在冲突**新出现**时拉起主窗口。
+- **打开菜单栏面板后不要无条件关开 popover 重锚。** `preferredContentSize` 会自己跟着内容长；每次 refresh 后 `performClose` + `show` 会闪。只在 popover 真漂到屏幕角落（原点接近 (0,0)）时才抢救重锚。
 - **那个 0.7 秒的回退 `Timer` 必须 `RunLoop.main.add(t, forMode: .common)`。** 默认模式下面板/菜单打开时 run loop 进入 tracking 模式，timer 直接停摆 —— 成功/失败图标会**永久**卡在菜单栏上。
 - **菜单栏图标是静态 SF Symbol，状态靠形状区分**（`IconState+Symbol.swift`）。菜单栏是单色 template 渲染，颜色不生效。**常态用的就是 App 图标那个 `arrow.triangle.2.circlepath`** —— 同一个符号，改一边要同时改 `Icon/make-icon.swift`，有测试钉住。`healthy` / `refreshing` / `syncing` **刻意共用**它：静态图区分不了「在跑」，而那件事由面板里的 `ProgressView` 和 tooltip 负责说。真正会变形的只有「要你动手」（pending）和「出事了」（broken / unavailable）。
 - **菜单栏项用 `squareLength`，符号字号在 `CloudotTheme.menuBarSymbolPointSize`。** 调大之前先看 `icloud.slash` —— 它是这批里最宽的，会第一个被裁。`MenuBarIconTests` 有一条专门量这个。

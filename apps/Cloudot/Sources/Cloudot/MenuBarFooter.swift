@@ -4,6 +4,10 @@ struct MenuBarFooter: View {
     let model: AppModel
     let openMainWindow: () -> Void
 
+    /// 底行「检查更新」的一次性反馈（已是最新 / 失败），几秒后清掉。
+    /// 不用 model.banner：Setup 态没有 BannerView，主窗口又可能不在前台。
+    @State private var updateHint: String?
+
     var body: some View {
         VStack(spacing: CloudotTheme.compactSpacing) {
             Divider()
@@ -78,7 +82,12 @@ struct MenuBarFooter: View {
             }
 
             HStack(spacing: CloudotTheme.compactSpacing) {
-                if let lastRefresh = model.lastRefresh {
+                if let updateHint {
+                    Text(updateHint)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                } else if let lastRefresh = model.lastRefresh {
                     Label(Format.relative(lastRefresh), systemImage: "clock")
                         .font(.callout)
                         .foregroundStyle(.tertiary)
@@ -86,6 +95,15 @@ struct MenuBarFooter: View {
                 }
 
                 Spacer(minLength: CloudotTheme.compactSpacing)
+
+                // 文字按钮放底行，不挤上面「设置 / 刷新 / 同步」三联。
+                // 有新版本时上面已经出现「更新到 X」大按钮；这里始终保留入口，
+                // 方便主动查一次（force，清掉缓存）。
+                Button(checkUpdateLabel, action: checkForUpdate)
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .disabled(model.isCheckingForUpdate || model.isBusy)
+                    .help("检查是否有新版本")
 
                 Button("退出", systemImage: "power", action: quit)
                     .buttonStyle(.borderless)
@@ -106,6 +124,11 @@ struct MenuBarFooter: View {
         return "刷新状态 · 上次更新：\(Format.relative(lastRefresh))（⌘R）"
     }
 
+    private var checkUpdateLabel: String {
+        if model.isCheckingForUpdate { return "检查中…" }
+        return "检查更新"
+    }
+
     private func sync() {
         Task {
             await model.sync()
@@ -118,6 +141,33 @@ struct MenuBarFooter: View {
             from: check.current.description,
             to: check.latest.description
         )
+    }
+
+    private func checkForUpdate() {
+        updateHint = nil
+        Task {
+            await model.checkForUpdate(force: true)
+            if let check = model.updateCheck {
+                if check.isAvailable {
+                    // 上面会自动出现「更新到 X」大按钮
+                    updateHint = nil
+                } else {
+                    updateHint = "已是最新 \(check.current.description)"
+                    clearHintSoon()
+                }
+            } else {
+                // force 失败时 AppModel 会写 failure banner；底行再给一句短的
+                updateHint = model.banner?.title ?? "检查失败"
+                clearHintSoon()
+            }
+        }
+    }
+
+    private func clearHintSoon() {
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            updateHint = nil
+        }
     }
 
     private func apply() {
