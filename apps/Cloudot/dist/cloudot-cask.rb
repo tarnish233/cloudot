@@ -1,6 +1,6 @@
 cask "cloudot" do
   version "0.3.0"
-  sha256 "PLACEHOLDER_填入发布时的_sha256"
+  sha256 "27fc3afd06dcf083ffbf4aea5aac927959c611a31be4954470d145a90d6f50ab"
 
   url "https://github.com/tarnish233/cloudot/releases/download/v#{version}/Cloudot-#{version}.dmg"
   name "cloudot"
@@ -22,7 +22,7 @@ cask "cloudot" do
   caveats <<~EOS
     cloudot 没有 Apple 开发者签名，装完先跑这一行：
 
-      xattr -dr com.apple.quarantine /Applications/Cloudot.app
+      xattr -dr com.apple.quarantine #{appdir}/Cloudot.app
 
     不跑的话 GUI 打不开，而且 `cloudot` 命令会被系统直接杀掉（退出码 137）——
     因为链到 PATH 上的那个二进制就在 .app 里面，同样带着隔离属性。
