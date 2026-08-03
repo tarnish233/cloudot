@@ -25,9 +25,15 @@ use std::process::ExitCode;
     name = "cloudot",
     version,
     about = "macOS 配置同步器 —— 通过 git 在多台机器间同步 dotfiles",
-    long_about = None
+    long_about = None,
+    // clap 默认短选项是 -V；常见习惯是 -v，关掉内建再自己挂一份
+    disable_version_flag = true,
 )]
 struct Cli {
+    /// 打印版本号
+    #[arg(short = 'v', visible_short_alias = 'V', long = "version", action = clap::ArgAction::Version)]
+    _version: (),
+
     /// 以 JSON 输出（含错误）；GUI 与 Agent 用这个模式
     #[arg(long, global = true)]
     json: bool,
