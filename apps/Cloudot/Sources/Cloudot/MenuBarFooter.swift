@@ -71,8 +71,10 @@ struct MenuBarFooter: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
                 .keyboardShortcut("s", modifiers: [.command])
-                .disabled(!model.isReady || model.isBusy)
-                .help("提交本地改动、拉取远端并推送（⌘S）")
+                .disabled(!model.canSync)
+                .help(model.needsSetup
+                      ? "先完成初始化再同步"
+                      : "提交本地改动、拉取远端并推送（⌘S）")
             }
 
             HStack(spacing: CloudotTheme.compactSpacing) {

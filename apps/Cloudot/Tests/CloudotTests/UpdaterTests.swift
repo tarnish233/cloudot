@@ -179,11 +179,15 @@ final class UpdaterTests: XCTestCase {
             XCTAssertEqual(first.latest, v("9.9.9"))
 
             // 把源关掉再查一次 —— 如果真的又打了网络，会失败并把结果清掉或覆盖。
-            // 幂等实现是 `guard updateCheck == nil`，所以第二次必须直接返回。
+            // 幂等实现是 `guard updateCheck == nil`（force: false），所以第二次必须直接返回。
             server.stop()
             await model.checkForUpdate()
             XCTAssertEqual(model.updateCheck?.latest, first.latest)
             XCTAssertEqual(model.updateCheck?.downloadURL, first.downloadURL)
+
+            // force: true 会清掉旧结果再查；源已关，应查失败并把结果置空（或保持失败路径）
+            await model.checkForUpdate(force: true)
+            XCTAssertNil(model.updateCheck, "force 重查时源已关，不该还留着旧的成功结果")
         }
     }
 

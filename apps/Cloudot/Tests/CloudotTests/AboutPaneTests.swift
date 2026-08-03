@@ -62,6 +62,9 @@ final class AboutPaneTests: XCTestCase {
     /// 这条会跟着 `--version` 的输出格式走：clap 打印的是 `cloudot 0.2.0`，
     /// 解析取的是空格后那段。格式变了这里会先炸，而不是等「关于」页显示出
     /// 「cloudot」当版本号。
+    ///
+    /// 关于页**默认只显示 App 版本**；CLI 版本只在与 App 不一致时才标橙出现，
+    /// 所以这里仍然要能读到 CLI 版本——分叉诊断依赖它。
     func testCLIVersionLooksLikeAVersion() async throws {
         let model = AppModel()
         try XCTSkipIf(model.locateError != nil, "本机没装 cloudot")
@@ -82,5 +85,14 @@ final class AboutPaneTests: XCTestCase {
         let first = model.cliVersion
         await model.loadCLIVersion()
         XCTAssertEqual(model.cliVersion, first)
+    }
+
+    /// 强制检查更新会清掉旧结果再查；默认检查在已有结果时幂等。
+    /// （网络行为由 UpdaterTests 覆盖，这里只钉 AppModel 的 force 语义入口存在。）
+    func testCheckForUpdateForceClearsCachedResult() async {
+        let model = AppModel()
+        // 没有假源时 force 会失败并保持 nil，至少不应崩溃 / 卡住 isChecking
+        await model.checkForUpdate(force: true)
+        XCTAssertFalse(model.isCheckingForUpdate)
     }
 }

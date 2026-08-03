@@ -1,0 +1,20 @@
+{
+    "ok": false,
+    "result": {
+        "conflict": {
+            "branch": "main",
+            "files": [
+                {
+                    "diff": "diff --git a/files/.config/ghostty/config b/files/.config/ghostty/config\nindex 0ecd04d..22bd39d 100644\n--- a/files/.config/ghostty/config\n+++ b/files/.config/ghostty/config\n@@ -1 +1 @@\n-theme = solarized\n+theme = light",
+                    "path": "files/.config/ghostty/config",
+                    "truncated": false
+                }
+            ],
+            "remote_ref": "origin/main"
+        },
+        "kind": "pull_conflict",
+        "message": "\u8fdc\u7aef\u6709\u51b2\u7a81\u6539\u52a8\uff0c\u5df2\u81ea\u52a8\u56de\u6eda \u2014\u2014 store \u5de5\u4f5c\u6811\u4fdd\u6301\u5e72\u51c0\uff0c\u4f60\u7684\u914d\u7f6e\u6ca1\u88ab\u52a8\u8fc7\u3002\n\u672c\u5730\u8fd9\u4efd\u4ecd\u7136\u751f\u6548\uff0c\u8fdc\u7aef\u90a3\u4efd\u8fd8\u6ca1\u843d\u5730\u3002\n\u51b2\u7a81\u6587\u4ef6\uff1a\n  files/.config/ghostty/config\n\n\u600e\u4e48\u5904\u7406\uff1a\n  \u60f3\u8981\u8fdc\u7aef\u7684   cloudot resolve --theirs\n  \u60f3\u7559\u672c\u5730\u7684   cloudot resolve --ours\n  \u6216\u5728 App \u91cc\u6253\u5f00\u51b2\u7a81\u9762\u677f\u9010\u6587\u4ef6\u67e5\u770b diff \u540e\u9009\u8fb9\n\ngit \u539f\u59cb\u8f93\u51fa\uff1a\nFrom /var/folders/9m/dfxmtz213z1gvq4g6c1g3w5c0000gp/T/tmp.aLf1bp0itS/remote\n   c2c7889..3aa859f  main       -> origin/main\nRebasing (1/1)\rerror: could not apply b7bbb12... cloudot: sync from machine-a\nhint: Resolve all conflicts manually, mark them as resolved with\nhint: \"git add/rm <conflicted_files>\", then run \"git rebase --continue\".\nhint: You can instead skip this commit: run \"git rebase --skip\".\nhint: To abort and get back to the state before \"git rebase\", run \"git rebase --abort\".\nhint: Disable this message with \"git config set advice.mergeConflict false\"\nCould not apply b7bbb12... # cloudot: sync from machine-a",
+        "summary": "\u8fdc\u7aef\u6709\u51b2\u7a81\u6539\u52a8\uff08\u5df2\u81ea\u52a8\u56de\u6eda\uff09"
+    },
+    "schema": "cloudot.error/v1"
+}

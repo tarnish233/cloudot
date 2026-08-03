@@ -82,11 +82,41 @@ pub fn tagged(kind: ErrorKind, message: impl Into<String>) -> anyhow::Error {
 
 /// 从错误链里取回分类；没有标记过的算 `Other`。
 pub fn kind_of(error: &anyhow::Error) -> ErrorKind {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<Tagged>().map(|t| t.kind))
-        .unwrap_or(ErrorKind::Other)
+    for cause in error.chain() {
+        if cause.downcast_ref::<PullConflictError>().is_some() {
+            return ErrorKind::PullConflict;
+        }
+        if let Some(t) = cause.downcast_ref::<Tagged>() {
+            return t.kind;
+        }
+    }
+    ErrorKind::Other
 }
+
+/// 拉取冲突时附带的结构化信息，供 GUI 展示 diff 并让用户选边。
+///
+/// 冲突发生后 store 已经 `rebase --abort` 干净；这里的 diff 是
+/// `HEAD` vs `origin/<branch>` 的对比，不是带 `<<<<<<<` 的工作树。
+#[derive(Debug, Clone, Serialize)]
+pub struct ConflictReport {
+    /// 本地分支名
+    pub branch: String,
+    /// 对比的远端 ref，如 `origin/main`
+    pub remote_ref: String,
+    pub files: Vec<ConflictFile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConflictFile {
+    /// 相对 store 根的路径
+    pub path: String,
+    /// unified diff 文本（可能被截断）
+    pub diff: String,
+    pub truncated: bool,
+}
+
+/// 单文件 diff 上限。超出就截断并标 `truncated`，避免把整份大配置灌进 JSON。
+pub const CONFLICT_DIFF_LIMIT: usize = 64 * 1024;
 
 /// `cloudot --json` 出错时的输出体。
 #[derive(Debug, Serialize)]
@@ -96,15 +126,39 @@ pub struct ErrorReport {
     pub message: String,
     /// 一句话摘要，界面上做标题用
     pub summary: &'static str,
+    /// 仅 `pull_conflict` 时有：冲突文件列表 + 每文件 diff
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<ConflictReport>,
 }
+
+/// 带结构化冲突报告的错误，塞进 anyhow 链后由 [`ErrorReport::from`] 取回。
+#[derive(Debug)]
+pub struct PullConflictError {
+    pub report: ConflictReport,
+    pub message: String,
+}
+
+impl fmt::Display for PullConflictError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PullConflictError {}
 
 impl ErrorReport {
     pub fn from(error: &anyhow::Error) -> Self {
         let kind = kind_of(error);
+        let conflict = error.chain().find_map(|cause| {
+            cause
+                .downcast_ref::<PullConflictError>()
+                .map(|e| e.report.clone())
+        });
         Self {
             kind,
             message: format!("{error:#}"),
             summary: kind.summary(),
+            conflict,
         }
     }
 }

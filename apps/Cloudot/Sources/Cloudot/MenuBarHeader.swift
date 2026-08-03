@@ -19,7 +19,11 @@ struct MenuBarHeader: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.headline)
                     .font(.headline)
-                if let status = model.status {
+                if model.needsSetup {
+                    Text("连接仓库或在本地初始化")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else if let status = model.status {
                     Text(gitSummary(status.git))
                         .font(.callout)
                         .foregroundStyle(.secondary)

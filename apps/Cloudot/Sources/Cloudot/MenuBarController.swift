@@ -23,6 +23,9 @@ final class MenuBarController: NSObject {
     /// 期间不让状态变化把它顶掉。
     private var pulseRevert: Timer?
     private var lastPulseID = 0
+    /// 上一次观察到的冲突 id。只在 nil → 有值时拉主窗口，避免用户关掉窗口后
+    /// 每次状态刷新又被强制顶到前面。
+    private var lastConflictID: String?
 
     /// 成功/失败图标停留多久再回到常驻符号。
     private static let pulseDuration: TimeInterval = 0.7
@@ -73,6 +76,8 @@ final class MenuBarController: NSObject {
         withObservationTracking {
             _ = model.iconState
             _ = model.pulse
+            _ = model.pending
+            _ = model.conflict
         } onChange: { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
@@ -87,6 +92,21 @@ final class MenuBarController: NSObject {
         statusItem.button?.toolTip = "Cloudot · \(model.headline)"
         statusItem.button?.setAccessibilityLabel("Cloudot · \(model.headline)")
         diag("state=\(model.iconState) pulse=\(model.pulse.map { "\($0.kind)#\($0.id)" } ?? "nil") pulsing=\(pulseRevert != nil)")
+
+        // 确认框只在这里呈现一次（见 PendingActionPresenter）。
+        if model.pending != nil {
+            PendingActionPresenter.presentIfNeeded(model: model)
+        }
+
+        // 冲突 sheet 挂在主窗口上：菜单栏同步撞车时把主窗口拉起来让用户看 diff。
+        // 只在冲突**新出现**时拉一次，不然用户关掉主窗口后每次 refresh 都会再被顶开。
+        let conflictID = model.conflict?.id
+        if let conflictID, conflictID != lastConflictID {
+            lastConflictID = conflictID
+            showMainWindow()
+        } else if conflictID == nil {
+            lastConflictID = nil
+        }
 
         if let pulse = model.pulse, pulse.id != lastPulseID {
             lastPulseID = pulse.id
@@ -153,15 +173,38 @@ final class MenuBarController: NSObject {
             popover.performClose(nil)
             return
         }
-        guard let button = statusItem.button else { return }
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        // 让面板里按钮上的快捷键（⌘S / ⌘Q）能生效
-        popover.contentViewController?.view.window?.makeKey()
+        showPopoverAnchored()
         // 面板上就有「立即同步」按钮，显示旧状态会自相矛盾（写着「已同步」还让你点同步）。
         // 只拉 status：面板用不到 doctor/apps/backups，而 doctor 单独就要 87ms。
         Task {
             await model.refreshStatusOnly()
+            // status 从 nil → setup/内容会改 preferred size；若锚点丢了就重挂一次
+            self.reanchorPopoverIfNeeded()
         }
+    }
+
+    /// 贴着 status item 按钮弹出。锚点无效时绝不硬 show —— 否则 popover 会掉到 (0,0)。
+    private func showPopoverAnchored() {
+        guard let button = statusItem.button,
+              button.window != nil,
+              button.bounds.width > 0, button.bounds.height > 0
+        else {
+            diag("status item 按钮还没就绪，跳过弹出")
+            return
+        }
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        // 快捷键（⌘S / ⌘Q）需要 key window；window 尚未建好时不要硬 makeKey
+        if let window = popover.contentViewController?.view.window {
+            window.makeKey()
+        }
+    }
+
+    /// 内容尺寸剧变后，若 popover 还开着就关了再按按钮重锚 —— 防止漂到屏幕角落。
+    private func reanchorPopoverIfNeeded() {
+        guard popover.isShown else { return }
+        guard let button = statusItem.button, button.window != nil else { return }
+        popover.performClose(nil)
+        showPopoverAnchored()
     }
 
     func showMainWindow() {

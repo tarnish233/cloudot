@@ -92,6 +92,15 @@ enum Command {
         #[command(subcommand)]
         action: Option<BackupAction>,
     },
+    /// 拉取冲突后选边：用远端或保留本地
+    Resolve {
+        /// 用远端覆盖本地（`reset --hard origin/<branch>` + apply）
+        #[arg(long, group = "side")]
+        theirs: bool,
+        /// 保留本地并推送（`push --force-with-lease`）
+        #[arg(long, group = "side")]
+        ours: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -334,6 +343,40 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                         (false, false) => "未检测到",
                     };
                     println!("  {:<12} {:<12} {}", a.id, state, a.name);
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+
+        Command::Resolve { theirs, ours } => {
+            let side = match (*theirs, *ours) {
+                (true, false) => ops::ResolveSide::Theirs,
+                (false, true) => ops::ResolveSide::Ours,
+                _ => anyhow::bail!("指定 --theirs（用远端）或 --ours（保留本地）之一"),
+            };
+            let out = ops::resolve(&layout, side)?;
+            if json {
+                emit(ops::RESOLVE_SCHEMA, &out)?;
+            } else {
+                match out.side {
+                    ops::ResolveSide::Theirs => {
+                        println!(
+                            "已对齐远端 {}（HEAD {}）",
+                            out.target,
+                            out.head.as_deref().unwrap_or("?")
+                        );
+                        if let Some(applied) = &out.applied {
+                            print_heal(&applied.healed);
+                            print_apply(&applied.items);
+                        }
+                    }
+                    ops::ResolveSide::Ours => {
+                        println!(
+                            "已把本地推到 {}（--force-with-lease，HEAD {}）",
+                            out.target,
+                            out.head.as_deref().unwrap_or("?")
+                        );
+                    }
                 }
             }
             Ok(ExitCode::SUCCESS)

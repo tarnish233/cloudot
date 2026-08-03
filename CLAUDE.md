@@ -54,6 +54,8 @@ JSON 统一信封，消费方只需要一条解码路径：
 
 - schema 常量在各模块里（`ops.rs` 的 `SYNC_SCHEMA` 等）。加字段兼容，改语义要升版本。
 - 错误带机器可读的 `kind`（见 `errors.rs` 的 `ErrorKind`）。内部一律 `anyhow`，分类塞进错误链、在边界 `downcast` 取回 —— 别为了分类把代码库改成自定义错误类型，也别让界面去 grep 中文错误信息。
+- **`status` 未 init 时返回成功信封 + `initialized: false`**，不要抛 `NotInitialized`——那是写路径的事。GUI 靠这个字段画 Setup 引导，而不是红 banner。
+- **`pull_conflict` 的错误信封带 `conflict` 字段**（`ConflictReport`：文件列表 + 每文件 diff）。GUI 弹选边面板；终端用 `cloudot resolve --theirs|--ours`。冲突时仍先 `rebase --abort`。
 - **`doctor` 有 error 级检查项时以非零码退出，但输出合法的成功信封。** 消费方必须先解信封再看退出码。`CloudotCLI.swift` 就是这么做的，改那里要留住这个顺序。
 
 ### 安全关键路径
@@ -84,6 +86,7 @@ JSON 统一信封，消费方只需要一条解码路径：
 这些都是踩过的坑，改之前先看懂：
 
 - **不用 `MenuBarExtra`，自己持有 `NSStatusItem`**（`MenuBarController.swift`）。**注意原来的理由已经作废** —— 那时是「动画到不了状态栏，必须逐帧换图」，而图标现在是静态 SF Symbol，别再拿这条当依据。仍然自建是因为还有三件事非拿到 status item 不可：结果反馈那 0.7 秒的临时换图要能精确控制何时换回；tooltip 与辅助功能标签跟着 `headline` 走；点击时顺手拉一次 status（`MenuBarExtra` 没有点击回调）。迁移过去收益为零，不动。
+- **破坏性操作的确认框只由 `MenuBarController` 用 AppKit `NSAlert` 呈现一次**（`PendingActionPresenter`）。不要在 `MenuBarPanel` 和 `MainWindow` 上各挂一份 SwiftUI confirm——主窗 `isReleasedWhenClosed = false`，关窗后仍能再弹一个，锚不到 status item 就落到屏幕左下角。冲突 sheet 只挂主窗口；菜单栏 sync 撞车时由 Controller 在冲突**新出现**时拉起主窗口。
 - **那个 0.7 秒的回退 `Timer` 必须 `RunLoop.main.add(t, forMode: .common)`。** 默认模式下面板/菜单打开时 run loop 进入 tracking 模式，timer 直接停摆 —— 成功/失败图标会**永久**卡在菜单栏上。
 - **菜单栏图标是静态 SF Symbol，状态靠形状区分**（`IconState+Symbol.swift`）。菜单栏是单色 template 渲染，颜色不生效。**常态用的就是 App 图标那个 `arrow.triangle.2.circlepath`** —— 同一个符号，改一边要同时改 `Icon/make-icon.swift`，有测试钉住。`healthy` / `refreshing` / `syncing` **刻意共用**它：静态图区分不了「在跑」，而那件事由面板里的 `ProgressView` 和 tooltip 负责说。真正会变形的只有「要你动手」（pending）和「出事了」（broken / unavailable）。
 - **菜单栏项用 `squareLength`，符号字号在 `CloudotTheme.menuBarSymbolPointSize`。** 调大之前先看 `icloud.slash` —— 它是这批里最宽的，会第一个被裁。`MenuBarIconTests` 有一条专门量这个。
@@ -112,7 +115,7 @@ Homebrew Cask + GitHub Release 的 DMG（不再发 zip），一条 `brew install
 
 - **Swift fixture 是从真实 CLI 抓下来的输出，不是手写的** —— 手写只能验证「我以为的格式」。重抓：`cloudot --json status > apps/Cloudot/Tests/CloudotTests/Fixtures/status.json`。
 - 契约测试里有两条**方向相反**的断言，都是刻意的：未知的**错误分类**降级成 `other`（新分类只影响引导文案），未知的**链接状态**则整体解码失败（新状态可能意味着新的损坏形态，宁可报「输出异常」也不要静默降级成一个看起来正常的值）。
-- `e2e.sh` 在 `/tmp/cloudot-e2e` 下用假 HOME 模拟两台机器 + 一个 bare remote。里面有几条是**回归测试**（跨机器 unadopt 后的悬空软链自愈、rebase 冲突自动回滚、`add` 中途失败整体回滚），改相关逻辑时要保证它们仍然通过。
+- `e2e.sh` 在 `/tmp/cloudot-e2e` 下用假 HOME 模拟两台机器 + 一个 bare remote。里面有几条是**回归测试**（跨机器 unadopt 后的悬空软链自愈、rebase 冲突自动回滚 + `resolve` 选边、未 init 的 status 信封、`add` 中途失败整体回滚），改相关逻辑时要保证它们仍然通过。
 
 ## 注意
 

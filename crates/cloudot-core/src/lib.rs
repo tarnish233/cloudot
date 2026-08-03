@@ -22,7 +22,7 @@ pub mod secrets;
 pub mod status;
 
 pub use config::Config;
-pub use errors::{ErrorKind, ErrorReport, tagged};
+pub use errors::{ConflictFile, ConflictReport, ErrorKind, ErrorReport, PullConflictError, tagged};
 pub use links::LinkRecords;
 pub use lock::Lock;
 pub use manifest::Manifest;

@@ -40,6 +40,7 @@ cloudot apply              # 落地到本机
 | 命令 | 用途 |
 |---|---|
 | `init [--remote URL] [--device NAME]` | 初始化，可重复执行 |
+| `resolve --theirs` / `resolve --ours` | 拉取冲突后选边（远端 / 本地强推） |
 | `add <app>... [--force] [--allow-secrets]` | 纳管 |
 | `apply [--force]` | 把 store 落地到本机 |
 | `status [--json]` | 纳管与 git 状态 |
@@ -101,7 +102,7 @@ karabiner 被顶成实体文件后，`status` 会报 `本地是实体文件，�
 
 **git 走命令行而非 libgit2。** 直接继承已配好的 ssh-agent、`~/.ssh/config` 和 gh 凭据，不用自己接管认证。封装很薄（[git.rs](crates/cloudot-core/src/git.rs)），要换实现接口不用动。
 
-**store 工作树就是用户的实时配置，所以它永远不能停在中间状态。** 软链目标直接指向工作树，一旦 `git pull --rebase` 冲突残留 `UU` 状态，App 立刻就会读到塞满 `<<<<<<< HEAD` 的配置文件。所以拉取冲突时会自动 `rebase --abort`，保住本地那份继续生效，然后把远端/本地版本的查看与取舍命令列给用户。
+**store 工作树就是用户的实时配置，所以它永远不能停在中间状态。** 软链目标直接指向工作树，一旦 `git pull --rebase` 冲突残留 `UU` 状态，App 立刻就会读到塞满 `<<<<<<< HEAD` 的配置文件。所以拉取冲突时会自动 `rebase --abort`，保住本地那份继续生效，再给出结构化的冲突报告（文件列表 + 每文件 diff）。用户在 App 冲突面板里选边，或终端跑 `cloudot resolve --theirs`（对齐远端）/ `--ours`（保留本地并 `--force-with-lease` 推上去）。
 
 **manifest 是共享状态，软链是本地状态，两者会分叉。** 另一台机器 `unadopt` 之后，manifest 里没了、store 文件也删了，但本机的软链还在——那就成了悬空软链，App 直接读不到配置。只看 manifest 发现不了这种情况，所以本机额外记一份 `links.toml`（不进 git）用来对账。`apply` 会自动修复：先从 git 历史取回被删掉的内容，取不到就找最近的备份，还原成实体文件。**修不好时不删任何东西**——宁可留个坏链让 `doctor` 继续报警，也不能把用户唯一的线索抹掉。
 
@@ -131,7 +132,7 @@ crates/cloudot-core/     领域逻辑，CLI / 未来的 daemon 与 GUI 共用
 ├─ git.rs                git 命令行封装
 ├─ status.rs             状态模型（JSON 契约）
 ├─ doctor.rs             体检
-└─ ops.rs                init / add / apply / sync / unadopt
+└─ ops.rs                init / add / apply / sync / unadopt / resolve
 
 crates/cloudot-cli/      CLI，core 的第一个消费者
 apps/Cloudot/            SwiftUI GUI，CLI 的 JSON 消费者
@@ -149,9 +150,9 @@ JSON 用统一信封，所以消费方只需要一条解码路径：
 { "schema": "cloudot.error/v1", "ok": false, "result": { "kind": "locked", "summary": …, "message": … } }
 ```
 
-错误带**机器可读的分类**（`locked` / `needs_force` / `secrets_detected` / `pull_conflict` …）。内部一律用 `anyhow`，分类是塞进错误链里再在边界上 downcast 取回的——不用把整个代码库改成自定义错误类型，也不用让界面去 grep 中文错误信息。
+错误带**机器可读的分类**（`locked` / `needs_force` / `secrets_detected` / `pull_conflict` …）。内部一律用 `anyhow`，分类是塞进错误链里再在边界上 downcast 取回的——不用把整个代码库改成自定义错误类型，也不用让界面去 grep 中文错误信息。`pull_conflict` 额外带 `conflict: { branch, remote_ref, files: [{path, diff, truncated}] }`，供 GUI 画选边面板。
 
-schema 带版本号，加字段兼容，改语义要升版本。注意 `doctor` 在有 error 级检查项时会**以非零码退出但输出合法的成功信封**，所以消费方要先解信封再看退出码，不能反过来。
+schema 带版本号，加字段兼容，改语义要升版本。`status` 带 `initialized`：未跑过 `init` 时返回**成功**信封 + `initialized: false`（写路径仍是 `not_initialized`）。注意 `doctor` 在有 error 级检查项时会**以非零码退出但输出合法的成功信封**，所以消费方要先解信封再看退出码，不能反过来。
 
 ## GUI
 
@@ -166,11 +167,13 @@ open build/Cloudot.app
 
 主窗口从菜单栏面板的「设置」进入，分**概览 / 应用 / 体检 / 备份 / 关于**五个页面。
 
-「关于」页把 App 和 CLI 的版本并排显示，版本对不上时 CLI 那行标黄 —— 两边分叉时界面
-只会报「输出异常」，很难一眼看出是版本问题。它同时显示**实际在调用的 CLI 路径**
-（可能是 bundle 内自带的、`~/.cargo/bin` 里的，或 `defaults write` 指定的），
-并检查有没有新版本、提供一键更新。App 的版本号由 `make-app.sh` 从 workspace 的
-`Cargo.toml` 读，不另写一份。
+**空态是产品状态，不是故障。** 刚装好还没 `init` 时，菜单栏显示「开始设置」、图标保持常态环，概览页给一个可选 remote 的初始化表单——不会红 banner，也不会永久转圈。同步按钮在未 init 时禁用。
+
+**拉取冲突走选边面板。** sync 撞车后自动 abort，主窗口弹出文件列表 + monospaced diff，可选「用远端」或「保留本地并推送」。`--force` / `--allow-secrets` 仍不进 GUI。
+
+**确认对话框只由菜单栏控制器呈现一次**（AppKit `NSAlert`），菜单栏面板和主窗口不再各自挂 SwiftUI confirm——否则关窗后仍存活的宿主会再弹一个，锚不到 status item 就掉到屏幕左下角。
+
+「关于」页默认只显示一行 App 版本；**仅当 CLI 与 App 版本不一致**时才标橙显示 CLI 版本和实际路径（bundle 内 / `~/.cargo/bin` / `defaults write` 指定）。提供「检查更新」按钮可强制重查。App 的版本号由 `make-app.sh` 从 workspace 的 `Cargo.toml` 读，不另写一份。
 
 ### 菜单栏图标
 
@@ -237,7 +240,7 @@ apps/Cloudot/test.sh    # Swift 测试（契约 + 菜单栏图标 + 自更新；
 - 首次纳管、跨机器落地、双向同步、unadopt 还原
 - 软链被实体文件顶掉后的拒绝覆盖与 `--force` 恢复
 - **回归**：跨机器 unadopt 后的悬空软链自愈；修不好时必须报警而不是装作没事
-- **回归**：rebase 冲突自动回滚，实时配置不被冲突标记污染
+- **回归**：rebase 冲突自动回滚，实时配置不被冲突标记污染；`resolve --theirs/--ours`；未 init 的 status 成功返回
 - `add` 中途失败整体回滚，manifest 与 links.toml 均不被写脏
 - 凭据门禁拦下、报告不回显凭据值、`--allow-secrets` 放行、`doctor` 持续报错
 - store 的 `.gitignore` 生效、备份盘点与 prune

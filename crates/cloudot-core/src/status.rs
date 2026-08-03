@@ -9,13 +9,19 @@ pub const SCHEMA: &str = "cloudot.status/v1";
 
 /// `cloudot status --json` 的输出契约。
 ///
-/// 这是 CLI、（将来的）GUI 和 Agent 三端共用的唯一状态描述。加字段可以，
+/// 这是 CLI、GUI 和 Agent 三端共用的唯一状态描述。加字段可以，
 /// 改语义要同时改 `schema` 版本号。
 #[derive(Debug, Serialize)]
 pub struct Status {
     pub device: String,
     pub root: String,
-    /// 一眼判断要不要人工介入：store 是 git 仓库、所有纳管文件链接正常、没有孤儿。
+    /// 是否已经跑过 `cloudot init`（存在 `config.toml`）。
+    ///
+    /// 未初始化时 `status` **仍然成功返回** —— 那是产品空态，不是故障。
+    /// GUI 靠这个字段渲染引导，而不是把 `not_initialized` 当红 banner。
+    /// 写路径（sync/add/…）在未 init 时仍会返回 `NotInitialized`。
+    pub initialized: bool,
+    /// 一眼判断要不要人工介入：已初始化、store 是 git 仓库、所有纳管文件链接正常、没有孤儿。
     /// GUI 和 Agent 直接读这个，不用自己遍历下面的嵌套结构。
     pub healthy: bool,
     pub git: GitInfo,
@@ -64,6 +70,28 @@ pub struct AvailableApp {
 }
 
 pub fn build(layout: &Layout) -> Result<Status> {
+    // 未初始化是空态，不是错误：返回成功信封，让 GUI 画引导而不是红 banner。
+    if !Config::exists(layout) {
+        return Ok(Status {
+            device: String::new(),
+            root: layout.root().display().to_string(),
+            initialized: false,
+            healthy: false,
+            git: GitInfo {
+                repo: false,
+                branch: None,
+                head: None,
+                remote: None,
+                dirty: Vec::new(),
+                ahead: None,
+                behind: None,
+            },
+            apps: Vec::new(),
+            available: Vec::new(),
+            orphans: Vec::new(),
+        });
+    }
+
     let config = Config::load(layout)?;
     let manifest = Manifest::load(layout)?;
     let git = Git::new(layout.store());
@@ -134,10 +162,41 @@ pub fn build(layout: &Layout) -> Result<Status> {
     Ok(Status {
         device: config.device,
         root: layout.root().display().to_string(),
+        initialized: true,
         healthy,
         git: git_info,
         apps,
         available,
         orphans,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops;
+    use crate::testutil::TempHome;
+
+    #[test]
+    fn uninitialized_status_is_ok_not_error() {
+        let home = TempHome::new("status-uninit");
+        let layout = home.layout();
+        let st = build(&layout).unwrap();
+        assert!(!st.initialized);
+        assert!(!st.healthy);
+        assert!(st.apps.is_empty());
+        assert!(!st.git.repo);
+    }
+
+    #[test]
+    fn initialized_empty_store_is_healthy() {
+        let home = TempHome::new("status-init");
+        let layout = home.layout();
+        ops::init(&layout, None, Some("dev")).unwrap();
+        let st = build(&layout).unwrap();
+        assert!(st.initialized);
+        assert!(st.healthy);
+        assert_eq!(st.device, "dev");
+        assert!(st.git.repo);
+    }
 }

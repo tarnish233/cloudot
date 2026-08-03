@@ -59,7 +59,7 @@ impl Git {
     }
 
     /// 执行但允许失败，返回 (成功?, stdout, stderr)。
-    fn try_run(&self, args: &[&str]) -> Result<(bool, String, String)> {
+    pub fn try_run(&self, args: &[&str]) -> Result<(bool, String, String)> {
         let out = self.raw(args)?;
         Ok((
             out.status.success(),
@@ -197,11 +197,13 @@ impl Git {
         if !ok {
             // store 工作树就是用户的实时配置：停在冲突态会让 App 立刻读到
             // 塞满 `<<<<<<< HEAD` 的文件。所以必须回滚，绝不留中间状态。
-            let conflicts = self.conflicted_files();
+            let uu = self.conflicted_files();
             let aborted = self.rebase_abort();
             let detail = if stderr.is_empty() { stdout } else { stderr };
+            let branch = self.branch().unwrap_or_else(|| "main".to_owned());
+            let remote_ref = format!("origin/{branch}");
 
-            if !aborted && !conflicts.is_empty() {
+            if !aborted && !uu.is_empty() {
                 return Err(crate::tagged(
                     crate::ErrorKind::PullConflict,
                     format!(
@@ -217,32 +219,138 @@ impl Git {
                 ));
             }
 
-            let list = if conflicts.is_empty() {
+            // abort 之后工作树干净；用 HEAD vs origin/<branch> 做结构化 diff，
+            // 给 GUI 展示并让用户选边（`cloudot resolve --theirs/--ours`）。
+            let report = self.conflict_report(&branch, &remote_ref, &uu);
+            let list = if report.files.is_empty() {
                 String::new()
             } else {
-                format!("\n冲突文件：\n  {}\n", conflicts.join("\n  "))
-            };
-            return Err(crate::tagged(
-                crate::ErrorKind::PullConflict,
                 format!(
-                    "远端有冲突改动，已自动回滚 —— store 工作树保持干净，你的配置没被动过。\n\
-                     本地这份仍然生效，远端那份还没落地。{list}\n\
-                     怎么处理：\n\
-                     \x20 看远端版本   git -C {store} show origin/{branch}:<文件路径>\n\
-                     \x20 看本地改动   git -C {store} log -p -1\n\
-                     \x20 想要远端的   git -C {store} reset --hard origin/{branch} && cloudot apply\n\
-                     \x20 想留本地的   git -C {store} push --force-with-lease\n\n\
-                     git 原始输出：\n{detail}",
-                    store = self.dir.display(),
-                    branch = self.branch().unwrap_or_else(|| "main".to_owned()),
-                ),
-            ));
+                    "\n冲突文件：\n  {}\n",
+                    report
+                        .files
+                        .iter()
+                        .map(|f| f.path.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n  ")
+                )
+            };
+            let message = format!(
+                "远端有冲突改动，已自动回滚 —— store 工作树保持干净，你的配置没被动过。\n\
+                 本地这份仍然生效，远端那份还没落地。{list}\n\
+                 怎么处理：\n\
+                 \x20 想要远端的   cloudot resolve --theirs\n\
+                 \x20 想留本地的   cloudot resolve --ours\n\
+                 \x20 或在 App 里打开冲突面板逐文件查看 diff 后选边\n\n\
+                 git 原始输出：\n{detail}"
+            );
+            return Err(anyhow::Error::new(crate::PullConflictError {
+                report,
+                message,
+            }));
         }
         Ok(if self.head_short() == before {
             PullOutcome::UpToDate
         } else {
             PullOutcome::Updated
         })
+    }
+
+    /// 收集 `HEAD` 与远端 ref 之间有差异的文件及 unified diff。
+    ///
+    /// `hint_paths` 是 rebase 冲突时记下的 UU 列表（abort 前）；abort 后优先用
+    /// `git diff --name-only HEAD...remote`，无关历史等没有 merge-base 时回退到
+    /// 双侧 diff，再不行就用 hint。
+    pub fn conflict_report(
+        &self,
+        branch: &str,
+        remote_ref: &str,
+        hint_paths: &[String],
+    ) -> crate::ConflictReport {
+        let mut paths = self.diff_name_only(&["HEAD...".to_owned() + remote_ref]);
+        if paths.is_empty() {
+            paths = self.diff_name_only(&["HEAD".into(), remote_ref.to_owned()]);
+        }
+        if paths.is_empty() {
+            paths = hint_paths.to_vec();
+        }
+        paths.sort();
+        paths.dedup();
+
+        let files = paths
+            .into_iter()
+            .map(|path| {
+                let (diff, truncated) = self.file_diff("HEAD", remote_ref, &path);
+                crate::ConflictFile {
+                    path,
+                    diff,
+                    truncated,
+                }
+            })
+            .collect();
+
+        crate::ConflictReport {
+            branch: branch.to_owned(),
+            remote_ref: remote_ref.to_owned(),
+            files,
+        }
+    }
+
+    fn diff_name_only(&self, rev_args: &[String]) -> Vec<String> {
+        let mut args: Vec<&str> = vec!["diff", "--name-only"];
+        let owned: Vec<&str> = rev_args.iter().map(String::as_str).collect();
+        args.extend(owned);
+        self.try_run(&args)
+            .map(|(ok, out, _)| {
+                if ok {
+                    out.lines()
+                        .filter(|l| !l.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    /// 单文件 unified diff；超过 [`crate::errors::CONFLICT_DIFF_LIMIT`] 截断。
+    fn file_diff(&self, local: &str, remote: &str, path: &str) -> (String, bool) {
+        let (ok, out, err) = match self.try_run(&["diff", local, remote, "--", path]) {
+            Ok(v) => v,
+            Err(_) => return (String::new(), false),
+        };
+        // diff 有差异时退出码 1，也算成功输出
+        let text = if out.is_empty() { err } else { out };
+        if !ok && text.is_empty() {
+            return (String::new(), false);
+        }
+        let limit = crate::errors::CONFLICT_DIFF_LIMIT;
+        if text.len() > limit {
+            let mut cut = text[..limit].to_owned();
+            cut.push_str("\n…（diff 过长，已截断）");
+            (cut, true)
+        } else {
+            (text, false)
+        }
+    }
+
+    /// `git reset --hard <rev>`。给 `resolve --theirs` 用。
+    pub fn reset_hard(&self, rev: &str) -> Result<()> {
+        self.run(&["reset", "--hard", rev])?;
+        Ok(())
+    }
+
+    /// `git push --force-with-lease`。给 `resolve --ours` 用。
+    ///
+    /// lease 保护：若远端在我们 fetch 之后又有人推了新提交，推送会失败而不是
+    /// 默默盖掉别人的工作。
+    pub fn push_force_with_lease(&self) -> Result<()> {
+        if self.remote().is_none() {
+            bail!("还没配 remote");
+        }
+        self.run(&["push", "--force-with-lease"])?;
+        Ok(())
     }
 
     /// 处于冲突未解决状态的文件（`git diff --diff-filter=U`）。

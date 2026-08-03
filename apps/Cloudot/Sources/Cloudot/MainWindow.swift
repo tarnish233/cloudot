@@ -45,7 +45,10 @@ struct MainWindow: View {
             minWidth: CloudotTheme.windowMinimumWidth,
             minHeight: CloudotTheme.windowMinimumHeight
         )
-        .confirm(model)
+        // 确认框统一由 MenuBarController 呈现，这里不再挂 .confirm。
+        .sheet(item: Bindable(model).conflict) { report in
+            ConflictSheet(model: model, report: report)
+        }
         .task {
             // startAutoRefresh 内部第一件事就是 refresh()，所以首次打开窗口
             // 自然会拉一次完整数据，不用再单独补一刀。

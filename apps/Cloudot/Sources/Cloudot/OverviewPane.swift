@@ -13,6 +13,9 @@ struct OverviewPane: View {
                         Text(error.errorDescription ?? "无法读取 Cloudot 状态。")
                             .textSelection(.enabled)
                     }
+                } else if model.needsSetup {
+                    SetupCard(model: model)
+                        .frame(maxWidth: 520, alignment: .leading)
                 } else if let status = model.status {
                     OverviewContent(status: status, model: model)
                 } else {

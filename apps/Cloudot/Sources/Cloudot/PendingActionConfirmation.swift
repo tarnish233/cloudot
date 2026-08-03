@@ -1,34 +1,44 @@
-import SwiftUI
+import AppKit
 
-struct PendingActionConfirmation: ViewModifier {
-    @Bindable var model: AppModel
+/// 用 AppKit `NSAlert` 呈现 `PendingAction`，全局只此一处。
+///
+/// 以前 MenuBarPanel 和 MainWindow 各挂一份 SwiftUI `.alert`：主窗
+/// `isReleasedWhenClosed = false`，关窗后 view tree 仍在，一点确认就弹两个窗，
+/// 没锚点的那个会掉到屏幕左下角。LSUIElement 下 NSAlert 比双 SwiftUI alert 稳。
+@MainActor
+enum PendingActionPresenter {
+    /// 正在显示时不为 nil，避免 observation 重入把同一条 pending 弹两次。
+    private static var isShowing = false
 
-    func body(content: Content) -> some View {
-        content.alert(
-            model.pending?.title ?? "",
-            isPresented: $model.isPresentingPendingAction,
-            presenting: model.pending
-        ) { action in
-            Button(
-                action.confirmLabel,
-                role: action.isDestructive ? .destructive : nil
-            ) {
-                Task {
-                    await model.confirm(action)
-                }
-            }
-            Button("取消", role: .cancel) {
-                model.pending = nil
-            }
-        } message: { action in
-            Text(action.explanation)
+    static func presentIfNeeded(model: AppModel) {
+        guard !isShowing, let action = model.pending else { return }
+        isShowing = true
+
+        let alert = NSAlert()
+        alert.messageText = action.title
+        alert.informativeText = action.explanation
+        alert.alertStyle = action.isDestructive ? .warning : .informational
+
+        let confirm = alert.addButton(withTitle: action.confirmLabel)
+        if action.isDestructive {
+            confirm.hasDestructiveAction = true
         }
-    }
-}
+        alert.addButton(withTitle: "取消")
 
-extension View {
-    /// GUI 里所有会改文件的操作都经过确认。
-    func confirm(_ model: AppModel) -> some View {
-        modifier(PendingActionConfirmation(model: model))
+        // 菜单栏工具没有自己的 key window 时，alert 仍应到前台
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+
+        isShowing = false
+        // 用户可能在 alert 期间又点了别的入口；只清理我们弹出来的那一条
+        if model.pending?.id == action.id {
+            model.pending = nil
+        }
+
+        if response == .alertFirstButtonReturn {
+            Task {
+                await model.confirm(action)
+            }
+        }
     }
 }

@@ -8,6 +8,8 @@ struct MenuBarContent: View {
             Group {
                 if let error = model.locateError {
                     MenuBarMissingBinaryView(error: error)
+                } else if model.needsSetup {
+                    SetupCard(model: model, compact: true)
                 } else if let status = model.status {
                     MenuBarStatusContent(status: status, model: model)
                 } else {

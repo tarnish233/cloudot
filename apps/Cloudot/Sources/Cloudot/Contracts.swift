@@ -17,6 +17,8 @@ struct ErrorResult: Decodable {
     let kind: ErrorKind
     let summary: String
     let message: String
+    /// 仅 `pull_conflict` 时有：冲突文件列表 + 每文件 diff
+    let conflict: ConflictReport?
 }
 
 /// 与 Rust 侧 `ErrorKind` 对应。未知取值落到 `other`，这样 CLI 加新分类时旧版界面不会崩。
@@ -44,12 +46,52 @@ enum ErrorKind: String, Decodable {
 struct Status: Decodable {
     let device: String
     let root: String
+    /// 是否已经跑过 `cloudot init`。缺省 true：旧 fixture / 旧 CLI 不带这个字段时按已初始化处理。
+    var initialized: Bool = true
     /// store 是 git 仓库、所有纳管文件链接正常、没有孤儿
     let healthy: Bool
     let git: GitInfo
     let apps: [AppStatus]
     let available: [AvailableApp]
     let orphans: [Orphan]
+
+    enum CodingKeys: String, CodingKey {
+        case device, root, initialized, healthy, git, apps, available, orphans
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        device = try c.decode(String.self, forKey: .device)
+        root = try c.decode(String.self, forKey: .root)
+        initialized = try c.decodeIfPresent(Bool.self, forKey: .initialized) ?? true
+        healthy = try c.decode(Bool.self, forKey: .healthy)
+        git = try c.decode(GitInfo.self, forKey: .git)
+        apps = try c.decode([AppStatus].self, forKey: .apps)
+        available = try c.decode([AvailableApp].self, forKey: .available)
+        orphans = try c.decode([Orphan].self, forKey: .orphans)
+    }
+}
+
+/// 拉取冲突后的结构化报告（随 error 信封的 `conflict` 字段下发）。
+struct ConflictReport: Decodable, Identifiable {
+    let branch: String
+    let remoteRef: String
+    let files: [ConflictFile]
+
+    var id: String { "\(branch)|\(remoteRef)|\(files.count)" }
+
+    enum CodingKeys: String, CodingKey {
+        case branch, files
+        case remoteRef = "remote_ref"
+    }
+}
+
+struct ConflictFile: Decodable, Identifiable {
+    let path: String
+    let diff: String
+    let truncated: Bool
+
+    var id: String { path }
 }
 
 struct GitInfo: Decodable {
@@ -312,4 +354,30 @@ struct UnadoptResult: Decodable {
     let name: String
     let restored: [String]
     let commit: String?
+}
+
+struct InitResult: Decodable {
+    let root: String
+    let device: String
+    let remote: String?
+    let cloned: Bool
+    let already: Bool
+    let appsInStore: Int
+
+    enum CodingKeys: String, CodingKey {
+        case root, device, remote, cloned, already
+        case appsInStore = "apps_in_store"
+    }
+}
+
+struct ResolveResult: Decodable {
+    let side: ResolveSide
+    let target: String
+    let applied: ApplyResult?
+    let head: String?
+}
+
+enum ResolveSide: String, Decodable {
+    case theirs
+    case ours
 }

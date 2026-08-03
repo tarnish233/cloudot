@@ -15,6 +15,8 @@ struct MenuBarPanel: View {
         }
         .frame(width: CloudotTheme.menuWidth)
         .tint(SystemTheme.accentColor)
-        .confirm(model)
+        // 确认框与冲突面板都不在这里挂：双 presenter 会弹两个窗、锚点丢了就
+        // 掉到左下角。确认走 MenuBarController 的 NSAlert；冲突 sheet 挂主窗口，
+        // 同步撞车时由 Controller 自动把主窗口拉起来。
     }
 }

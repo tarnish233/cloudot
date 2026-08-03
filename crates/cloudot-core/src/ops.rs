@@ -570,6 +570,86 @@ pub fn sync(layout: &Layout, message: Option<&str>) -> Result<SyncOutcome> {
     })
 }
 
+// ---------------------------------------------------------------- resolve
+
+pub const RESOLVE_SCHEMA: &str = "cloudot.resolve/v1";
+
+/// 拉取冲突后用户选边。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolveSide {
+    /// 用远端覆盖本地：`reset --hard origin/<branch>` + apply
+    Theirs,
+    /// 保留本地并推上去：`push --force-with-lease`
+    Ours,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ResolveOutcome {
+    pub side: ResolveSide,
+    /// theirs 时是 reset 到的 ref；ours 时是 push 目标 remote
+    pub target: String,
+    /// theirs 之后落地的结果；ours 时为 None
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied: Option<ApplyOutcome>,
+    pub head: Option<String>,
+}
+
+/// 冲突选边。store 在冲突时已经被 abort 干净，这里是用户看过 diff 之后的动作。
+///
+/// - **theirs**：丢弃本地未推送的提交，对齐远端，再 apply 把软链落到新内容。
+/// - **ours**：把本地历史强推上去（`--force-with-lease`，远端若有我们没见过的新提交会失败）。
+pub fn resolve(layout: &Layout, side: ResolveSide) -> Result<ResolveOutcome> {
+    let _lock = Lock::acquire(layout)?;
+    let _config = Config::load(layout)?;
+    let git = Git::new(layout.store());
+    if !git.is_repo() {
+        bail!(
+            "{} 不是 git 仓库，先跑 `cloudot init`",
+            layout.store().display()
+        );
+    }
+    if git.remote().is_none() {
+        bail!("还没配 remote，没有可对齐的远端");
+    }
+
+    let branch = git.branch().unwrap_or_else(|| "main".to_owned());
+    let remote_ref = format!("origin/{branch}");
+
+    match side {
+        ResolveSide::Theirs => {
+            // 确保有 origin/<branch> 可 reset
+            if !git
+                .try_run(&["rev-parse", "--verify", &remote_ref])
+                .map(|(ok, _, _)| ok)
+                .unwrap_or(false)
+            {
+                bail!(
+                    "找不到 {remote_ref}，先 `git -C {} fetch`",
+                    layout.store().display()
+                );
+            }
+            git.reset_hard(&remote_ref)?;
+            let applied = apply_inner(layout, false)?;
+            Ok(ResolveOutcome {
+                side,
+                target: remote_ref,
+                applied: Some(applied),
+                head: git.head_short(),
+            })
+        }
+        ResolveSide::Ours => {
+            git.push_force_with_lease()?;
+            Ok(ResolveOutcome {
+                side,
+                target: git.remote().unwrap_or_default(),
+                applied: None,
+                head: git.head_short(),
+            })
+        }
+    }
+}
+
 // ---------------------------------------------------------------- unadopt
 
 #[derive(Debug, serde::Serialize)]

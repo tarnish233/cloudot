@@ -1,0 +1,22 @@
+{
+  "ok": true,
+  "result": {
+    "apps": [],
+    "available": [],
+    "device": "",
+    "git": {
+      "ahead": null,
+      "behind": null,
+      "branch": null,
+      "dirty": [],
+      "head": null,
+      "remote": null,
+      "repo": false
+    },
+    "healthy": false,
+    "initialized": false,
+    "orphans": [],
+    "root": "/tmp/cloudot-uninit"
+  },
+  "schema": "cloudot.status/v1"
+}

@@ -34,6 +34,18 @@ mkdir -p "$A" "$B"
 git init --bare -q -b main "$REMOTE"
 
 # ─────────────────────────────────────────────── 机器 A：首次纳管
+section "空态：未 init 时 status 成功返回 initialized=false"
+export CLOUDOT_HOME="$A"
+UNINIT=$("$CLOUDOT" --json status)
+echo "$UNINIT" | grep -qE '"initialized"[[:space:]]*:[[:space:]]*false' \
+  && pass "未 init 的 status 带 initialized=false" || fail "未 init status 不对"
+echo "$UNINIT" | grep -qE '"ok"[[:space:]]*:[[:space:]]*true' \
+  && pass "未 init 的 status 是成功信封" || fail "未 init status 不是 ok"
+# 写路径仍拒绝
+"$CLOUDOT" --json sync >/dev/null 2>&1 \
+  && fail "未 init 时 sync 不该成功" \
+  || pass "未 init 时 sync 仍失败"
+
 section "机器 A：init + add ghostty"
 export CLOUDOT_HOME="$A"
 mkdir -p "$A/.config/ghostty"
@@ -148,6 +160,44 @@ grep -q '<<<<<<<' "$A/.config/ghostty/config" && fail "实时配置被冲突标�
   || pass "实时配置没有冲突标记"
 [ "$(cat "$A/.config/ghostty/config")" = "theme = solarized" ] \
   && pass "本机版本保持生效" || fail "本机内容被改了"
+
+# JSON 信封必须带结构化 conflict（GUI 靠它画 diff 面板）
+export CLOUDOT_HOME="$B"; printf 'theme = nord\n' > "$B/.config/ghostty/config"; "$CLOUDOT" sync >/dev/null 2>&1
+export CLOUDOT_HOME="$A"; printf 'theme = gruvbox\n' > "$A/.config/ghostty/config"
+CONFLICT_JSON=$("$CLOUDOT" --json sync 2>/dev/null || true)
+# CLI 默认 pretty-print，键值之间有空格
+echo "$CONFLICT_JSON" | grep -qE '"kind"[[:space:]]*:[[:space:]]*"pull_conflict"' \
+  && pass "JSON 错误分类是 pull_conflict" || fail "JSON 没有 pull_conflict"
+echo "$CONFLICT_JSON" | grep -qE '"conflict"[[:space:]]*:' \
+  && pass "JSON 带 conflict 字段" || fail "JSON 缺 conflict"
+echo "$CONFLICT_JSON" | grep -q 'files/.config/ghostty/config' \
+  && pass "conflict 列出了冲突文件" || fail "conflict 没列文件"
+
+section "回归：resolve --theirs 对齐远端"
+# 上面 A 本地是 gruvbox、远端是 nord；选远端
+export CLOUDOT_HOME="$A"
+"$CLOUDOT" resolve --theirs >/dev/null \
+  && pass "resolve --theirs 成功" || fail "resolve --theirs 失败"
+[ "$(cat "$A/.config/ghostty/config")" = "theme = nord" ] \
+  && pass "本机内容换成远端版本" || fail "theirs 后内容不对：$(cat "$A/.config/ghostty/config")"
+[ -z "$(git -C "$A/.cloudot/store" status --porcelain)" ] \
+  && pass "resolve 后工作树干净" || fail "resolve 后工作树不干净"
+
+section "回归：resolve --ours 强推本地"
+# 再制造一次冲突，这次选本地
+export CLOUDOT_HOME="$B"; printf 'theme = dracula\n' > "$B/.config/ghostty/config"; "$CLOUDOT" sync >/dev/null 2>&1
+export CLOUDOT_HOME="$A"; printf 'theme = solarized\n' > "$A/.config/ghostty/config"
+"$CLOUDOT" sync >/dev/null 2>&1 || true
+"$CLOUDOT" resolve --ours >/dev/null \
+  && pass "resolve --ours 成功" || fail "resolve --ours 失败"
+[ "$(cat "$A/.config/ghostty/config")" = "theme = solarized" ] \
+  && pass "本机内容保持本地版本" || fail "ours 后本地内容变了"
+# B 再 sync 应拿到 A 强推上去的 solarized
+export CLOUDOT_HOME="$B"
+"$CLOUDOT" sync >/dev/null \
+  && pass "B 能拉到 ours 强推的提交" || fail "B 拉 ours 结果失败"
+[ "$(cat "$B/.config/ghostty/config")" = "theme = solarized" ] \
+  && pass "B 收到 A 强推的本地版本" || fail "B 内容不是 solarized：$(cat "$B/.config/ghostty/config")"
 
 # ─────────────────────────────────────────────── add 的事务性
 # 曾经的行为：多路径 adopter 中途失败会留下「已建链但 manifest 和 links.toml

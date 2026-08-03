@@ -134,8 +134,10 @@ struct Banner: Identifiable {
         case .secretsDetected:
             "cloudot add \(subject ?? "<应用>") --allow-secrets    # 确认内容无害后再用"
         case .pullConflict:
-            "cloudot status && git -C ~/.cloudot/store log -p -1"
+            // 主路径是冲突面板；这条留给用户想去终端时复制
+            "cloudot resolve --theirs   # 或 --ours"
         case .notInitialized:
+            // 主路径是 App 内引导；写路径仍可能抛这个
             "cloudot init --remote git@github.com:<你>/dotfiles.git"
         default:
             // 没有匹配的分类时回落到显式给定的那条
@@ -174,6 +176,9 @@ final class AppModel {
     private(set) var appList: [AppListing] = []
     private(set) var backups: BackupSet?
 
+    /// 最近一次拉取冲突的结构化报告。非 nil 时界面弹出冲突面板。
+    var conflict: ConflictReport?
+
     private(set) var isRefreshing = false
     /// 这次刷新是用户主动点的吗。
     ///
@@ -184,6 +189,16 @@ final class AppModel {
     private(set) var lastRefresh: Date?
 
     var isBusy: Bool { isRefreshing || isWorking }
+
+    /// CLI 在、且已经 init 过，才能跑同步等写操作。
+    var canSync: Bool {
+        isReady && status?.initialized == true && !isBusy
+    }
+
+    /// 需要画「开始设置」引导：CLI 在、status 已拉到、但还没 init。
+    var needsSetup: Bool {
+        isReady && status?.initialized == false
+    }
 
     var banner: Banner?
     var pending: PendingAction?
@@ -234,13 +249,29 @@ final class AppModel {
         cliVersion = await cli.version()
     }
 
-    /// 查一次有没有新版。幂等 —— 重开「关于」页不会重复打网络。
-    /// 失败不弹 banner：这是后台的旁路操作，用户没主动要求，报错只会打扰人。
-    func checkForUpdate() async {
-        guard updateCheck == nil, !isCheckingForUpdate else { return }
+    /// 查一次有没有新版。
+    ///
+    /// - `force == false`（默认）：已有结果就跳过，启动和重开关于页不会重复打网络。
+    /// - `force == true`：清掉旧结果再查，给「检查更新」按钮用。
+    ///
+    /// 失败不弹 banner：后台旁路失败打扰人；强制检查失败时才给一条温和提示。
+    func checkForUpdate(force: Bool = false) async {
+        if force {
+            updateCheck = nil
+        } else if updateCheck != nil {
+            return
+        }
+        guard !isCheckingForUpdate else { return }
         isCheckingForUpdate = true
         defer { isCheckingForUpdate = false }
-        updateCheck = try? await Updater.check(current: Self.appVersion)
+        do {
+            updateCheck = try await Updater.check(current: Self.appVersion)
+        } catch {
+            if force {
+                banner = .fail("检查更新失败", error.localizedDescription)
+            }
+            // 非强制：静默
+        }
     }
 
     /// 下载并替换。装完不自动重启 —— 只把 `pendingRestartVersion` 立起来让界面问。
@@ -355,6 +386,10 @@ final class AppModel {
         do {
             status = try await cli.status()
             lastRefresh = .now
+            // 成功拉到状态后，清掉过期的 not_initialized 之类横幅
+            if banner?.kind == .notInitialized {
+                banner = nil
+            }
         } catch {
             banner = .from(error)
         }
@@ -407,14 +442,20 @@ final class AppModel {
         if locateError != nil { return .unavailable }
         if isWorking { return .syncing }
         if isRefreshing && isUserInitiatedRefresh { return .refreshing }
-        guard let status else { return .unavailable }
+        guard let status else {
+            // 还在拉第一次 status，或 CLI 在但尚无结果 —— 不用 unavailable（那是「出事」）
+            return .healthy
+        }
+        // 未初始化是空态，菜单栏保持常态环，不装作坏了
+        if !status.initialized { return .healthy }
         if !status.healthy { return .broken }
         return status.git.hasPendingWork ? .pending : .healthy
     }
 
     var overallLevel: Level {
         if locateError != nil { return .error }
-        guard let status else { return .warn }
+        guard let status else { return .ok }
+        if !status.initialized { return .ok }
         if !status.healthy { return .error }
         if status.git.hasPendingWork { return .warn }
         return .ok
@@ -423,6 +464,7 @@ final class AppModel {
     var headline: String {
         if locateError != nil { return "找不到 cloudot" }
         guard let status else { return "读取中…" }
+        if !status.initialized { return "开始设置" }
         if !status.orphans.isEmpty { return "有配置读不到了" }
         if !status.healthy { return "需要处理" }
         if let behind = status.git.behind, behind > 0 { return "远端有 \(behind) 个新提交" }
@@ -461,13 +503,22 @@ final class AppModel {
         // 状态是主角，读不到就没必要继续；其余各自失败不影响整体。
         do {
             status = try await cli.status()
+            if banner?.kind == .notInitialized {
+                banner = nil
+            }
         } catch {
             banner = .from(error)
             return
         }
+        // 未 init 时 doctor/apps 仍可拉（doctor 现在是 warn 级引导），失败不致命
         doctor = try? await cli.doctor(net: false)
-        appList = (try? await cli.apps()) ?? []
-        backups = try? await cli.backups()
+        if status?.initialized == true {
+            appList = (try? await cli.apps()) ?? []
+            backups = try? await cli.backups()
+        } else {
+            appList = []
+            backups = nil
+        }
         lastRefresh = .now
         // 纳管范围可能变了（刚 add 完），监视范围要跟上
         updateWatchedDirectories()
@@ -475,21 +526,69 @@ final class AppModel {
 
     // MARK: - 写
 
+    /// 初始化 `~/.cloudot`。`remote` 可空（只建本地仓库）。
+    func initialize(remote: String?) async {
+        await perform { cli in
+            let out = try await cli.initialize(remote: remote)
+            var parts: [String] = ["设备 \(out.device)"]
+            if let remote = out.remote {
+                parts.append("remote \(remote)")
+            } else {
+                parts.append("未配置 remote（之后可再 init --remote）")
+            }
+            if out.cloned {
+                parts.append(out.appsInStore > 0
+                    ? "已从远端 clone，\(out.appsInStore) 个纳管条目，可点「落地到本机」"
+                    : "已从远端 clone（仓库还是空的）")
+            } else if out.already {
+                parts.append("配置已更新")
+            }
+            return .ok(out.already ? "已更新" : "初始化完成", parts.joined(separator: "\n"))
+        }
+    }
+
     func sync() async {
         await perform { cli in
-            let result = try await cli.sync()
-            var parts: [String] = []
-            if let commit = result.commit { parts.append("已提交 \(commit)") }
-            parts.append(result.pull.label)
-            if result.pushed { parts.append("已推送") }
-            for healed in result.applied.healed {
-                parts.append("\(healed.target)：\(healed.source.label)")
+            do {
+                let result = try await cli.sync()
+                var parts: [String] = []
+                if let commit = result.commit { parts.append("已提交 \(commit)") }
+                parts.append(result.pull.label)
+                if result.pushed { parts.append("已推送") }
+                for healed in result.applied.healed {
+                    parts.append("\(healed.target)：\(healed.source.label)")
+                }
+                for item in result.applied.changedItems {
+                    parts.append("\(item.target)：\(item.action.label)")
+                }
+                return .ok("同步完成", parts.joined(separator: "\n"))
+            } catch {
+                // 冲突：打开面板而不是只丢一条 banner
+                if let cloudot = error as? CloudotError,
+                   cloudot.kind == .pullConflict,
+                   case .reported(let result) = cloudot,
+                   let report = result.conflict {
+                    self.conflict = report
+                }
+                throw error
             }
-            for item in result.applied.changedItems {
-                parts.append("\(item.target)：\(item.action.label)")
-            }
-            return .ok("同步完成", parts.joined(separator: "\n"))
         }
+    }
+
+    /// 冲突选边。theirs = 用远端；ours = 留本地并强推。
+    func resolveConflict(_ side: ResolveSide) async {
+        let label = side == .theirs ? "已改用远端版本" : "已保留本地并推送"
+        await perform { cli in
+            let out = try await cli.resolve(side: side)
+            self.conflict = nil
+            var detail = out.target
+            if let head = out.head { detail += " · HEAD \(head)" }
+            return .ok(label, detail)
+        }
+    }
+
+    func dismissConflict() {
+        conflict = nil
     }
 
     func apply() async {

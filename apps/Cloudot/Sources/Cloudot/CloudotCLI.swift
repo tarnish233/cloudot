@@ -121,6 +121,21 @@ struct CloudotCLI: Sendable {
         try await call(["backups", "prune", "--keep", String(keep)], as: PruneResult.self)
     }
 
+    /// `cloudot init [--remote]`。remote 空字符串视作未提供。
+    func initialize(remote: String?) async throws -> InitResult {
+        var args = ["init"]
+        if let remote, !remote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--remote", remote.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        return try await call(args, as: InitResult.self)
+    }
+
+    /// 拉取冲突后选边。
+    func resolve(side: ResolveSide) async throws -> ResolveResult {
+        let flag = side == .theirs ? "--theirs" : "--ours"
+        return try await call(["resolve", flag], as: ResolveResult.self)
+    }
+
     // MARK: - 内部
 
     private func call<R: Decodable>(_ args: [String], as type: R.Type) async throws -> R {

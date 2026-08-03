@@ -51,7 +51,7 @@ struct MainWindowHeader: View {
                 Button("同步", systemImage: "arrow.triangle.2.circlepath", action: sync)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut("s", modifiers: [.command])
-                    .disabled(!model.isReady || model.isBusy)
+                    .disabled(!model.canSync)
             }
         }
     }

@@ -51,12 +51,16 @@ pub fn run(layout: &Layout, check_network: bool) -> Result<Report> {
     let mut checks = Vec::new();
 
     // 1. 初始化状态
+    //
+    // 未初始化是产品空态，不是故障。用 Warn 而不是 Error：GUI 空态页会画引导，
+    // doctor 不应再把它渲染成「发现需要处理的问题」主叙事。`ok` 仍为 true（warn
+    // 不算失败），和「还没纳管任何应用」那条 warn 一个量级。
     if !Config::exists(layout) {
         checks.push(with_hint(
-            check("config", Level::Error, "还没初始化"),
-            "跑 `cloudot init`",
+            check("config", Level::Warn, "还没初始化"),
+            "在 App 里完成设置，或跑 `cloudot init [--remote <url>]`",
         ));
-        return Ok(Report { ok: false, checks });
+        return Ok(Report { ok: true, checks });
     }
     let config = Config::load(layout)?;
     checks.push(check(

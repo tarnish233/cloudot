@@ -23,21 +23,26 @@ struct AboutPane: View {
             }
 
             Section("版本") {
-                LabeledContent("应用", value: Self.appVersion)
-                // CLI 版本单独显示，不是冗余：GUI 调的可能是 bundle 内自带的那份，
-                // 也可能是 ~/.cargo/bin 里的旧二进制。两个版本对不上时界面只会报
-                // 「输出异常」，摆在这里能一眼看出来。
-                LabeledContent("命令行工具") {
-                    if let version = model.cliVersion {
-                        // 版本对不上时标黄。三元两边都得是 Color ——
-                        // `.primary` 是 HierarchicalShapeStyle，和 `.orange` 类型不通。
-                        Text(version)
-                            .foregroundStyle(version == Self.appVersion ? Color.primary : Color.orange)
-                    } else if model.isReady {
-                        Text("读取中…").foregroundStyle(.secondary)
-                    } else {
-                        Text("未找到").foregroundStyle(.secondary)
+                // 正常路径只显示一行 App 版本。CLI 与 App 一致时不必分行；
+                // 只有两边分叉时才标橙提醒（否则界面只会报「输出异常」）。
+                LabeledContent("版本", value: Self.appVersion)
+
+                if let cliVersion = model.cliVersion, cliVersion != Self.appVersion {
+                    LabeledContent("命令行工具") {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(cliVersion).foregroundStyle(Color.orange)
+                            if let path = model.cliPath {
+                                Text(path)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .textSelection(.enabled)
+                            }
+                        }
                     }
+                } else if model.cliVersion == nil && !model.isReady {
+                    LabeledContent("命令行工具", value: "未找到")
                 }
 
                 LabeledContent("最新版本") { latest }
@@ -106,13 +111,12 @@ struct AboutPane: View {
         }
     }
 
-    /// 最新版本那一格：查到了显示版本号 + 更新按钮，没查到就说明状态。
+    /// 最新版本那一格：查到了显示版本号 + 更新按钮；始终提供「检查更新」。
     @ViewBuilder
     private var latest: some View {
-        if let check = model.updateCheck {
-            if check.isAvailable {
-                HStack(spacing: CloudotTheme.compactSpacing) {
-                    // 有新版时标黄，和上面「CLI 版本对不上」用的是同一套视觉语言
+        HStack(spacing: CloudotTheme.compactSpacing) {
+            if let check = model.updateCheck {
+                if check.isAvailable {
                     Text(check.latest.description).foregroundStyle(Color.orange)
                     Button("更新") {
                         model.pending = .installUpdate(
@@ -122,14 +126,20 @@ struct AboutPane: View {
                     }
                     .controlSize(.small)
                     .disabled(model.isBusy || model.pendingRestartVersion != nil)
+                } else {
+                    Text("已是最新").foregroundStyle(.secondary)
                 }
+            } else if model.isCheckingForUpdate {
+                Text("检查中…").foregroundStyle(.secondary)
             } else {
-                Text("已是最新").foregroundStyle(.secondary)
+                Text("尚未检查").foregroundStyle(.secondary)
             }
-        } else if model.isCheckingForUpdate {
-            Text("检查中…").foregroundStyle(.secondary)
-        } else {
-            Text("查不到").foregroundStyle(.secondary)
+
+            Button("检查更新") {
+                Task { await model.checkForUpdate(force: true) }
+            }
+            .controlSize(.small)
+            .disabled(model.isCheckingForUpdate || model.isBusy)
         }
     }
 

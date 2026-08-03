@@ -35,12 +35,23 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(status.apps.first?.files.first?.state, .linked)
         XCTAssertTrue(status.healthy)
         XCTAssertTrue(status.orphans.isEmpty)
+        // 旧 fixture 没有 initialized 字段时按已初始化处理
+        XCTAssertTrue(status.initialized)
     }
 
     func testSandboxStatusDecodes() throws {
         // e2e 沙盒跑完后的状态，结构与真实环境不同（可能没纳管、有可用应用）
         let status = try decodeOK("status-sandbox", Status.self)
         XCTAssertFalse(status.root.isEmpty)
+    }
+
+    /// 未初始化是**成功**信封，不是错误 —— GUI 靠 `initialized: false` 画引导页。
+    func testUninitializedStatusDecodes() throws {
+        let status = try decodeOK("status-uninitialized", Status.self)
+        XCTAssertFalse(status.initialized)
+        XCTAssertFalse(status.healthy)
+        XCTAssertTrue(status.apps.isEmpty)
+        XCTAssertFalse(status.git.repo)
     }
 
     func testDoctorDecodes() throws {
@@ -101,6 +112,8 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(envelope.result.kind, .notInitialized)
         XCTAssertEqual(envelope.schema, "cloudot.error/v1")
         XCTAssertFalse(envelope.result.summary.isEmpty)
+        // 写路径的 not_initialized 没有 conflict 字段
+        XCTAssertNil(envelope.result.conflict)
     }
 
     func testUnknownAppError() throws {
@@ -109,6 +122,60 @@ final class ContractTests: XCTestCase {
             from: try fixture("error-unknown-app")
         )
         XCTAssertEqual(envelope.result.kind, .unknownApp)
+    }
+
+    /// 拉取冲突：错误信封带结构化 conflict（文件列表 + diff），供 GUI 选边。
+    func testPullConflictErrorCarriesDiff() throws {
+        let envelope = try decoder.decode(
+            Envelope<ErrorResult>.self,
+            from: try fixture("error-pull-conflict")
+        )
+        XCTAssertFalse(envelope.ok)
+        XCTAssertEqual(envelope.result.kind, .pullConflict)
+        let report = try XCTUnwrap(envelope.result.conflict)
+        XCTAssertEqual(report.branch, "main")
+        XCTAssertEqual(report.remoteRef, "origin/main")
+        XCTAssertFalse(report.files.isEmpty)
+        let file = try XCTUnwrap(report.files.first)
+        XCTAssertEqual(file.path, "files/.config/ghostty/config")
+        XCTAssertTrue(file.diff.contains("theme = solarized") || file.diff.contains("theme = light"))
+        XCTAssertFalse(file.truncated)
+    }
+
+    /// 普通错误信封没有 conflict 字段时必须解成 nil，不能整包失败。
+    func testErrorWithoutConflictFieldDecodes() throws {
+        let json = #"""
+        {"schema":"cloudot.error/v1","ok":false,
+         "result":{"kind":"locked","summary":"被锁","message":"另一进程在跑"}}
+        """#
+        let envelope = try decoder.decode(
+            Envelope<ErrorResult>.self,
+            from: Data(json.utf8)
+        )
+        XCTAssertEqual(envelope.result.kind, .locked)
+        XCTAssertNil(envelope.result.conflict)
+    }
+
+    func testInitAndResolveResultsDecode() throws {
+        let initJSON = #"""
+        {"schema":"cloudot.init/v1","ok":true,"result":{
+          "root":"/tmp/x","device":"mbp","remote":"git@example.com:a/b.git",
+          "cloned":true,"already":false,"apps_in_store":2}}
+        """#
+        let initOut = try decoder.decode(Envelope<InitResult>.self, from: Data(initJSON.utf8)).result
+        XCTAssertEqual(initOut.device, "mbp")
+        XCTAssertEqual(initOut.appsInStore, 2)
+        XCTAssertTrue(initOut.cloned)
+
+        let resolveJSON = #"""
+        {"schema":"cloudot.resolve/v1","ok":true,"result":{
+          "side":"theirs","target":"origin/main","head":"abc1234",
+          "applied":{"items":[],"healed":[]}}}
+        """#
+        let resolveOut = try decoder.decode(Envelope<ResolveResult>.self, from: Data(resolveJSON.utf8)).result
+        XCTAssertEqual(resolveOut.side, .theirs)
+        XCTAssertEqual(resolveOut.target, "origin/main")
+        XCTAssertNotNil(resolveOut.applied)
     }
 
     /// CLI 以后加新的错误分类时，旧版界面不能因为解不出来就整个崩掉 ——
