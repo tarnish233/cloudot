@@ -1,6 +1,6 @@
 cask "cloudot" do
-  version "0.5.0"
-  sha256 "8ad1c3805abc26292d3c473a9ef6de0681c9aaec406acc7b6b6e4950943d4afe"
+  version "0.5.1"
+  sha256 "90e3e0b08ff218d97afa72c8de3211bec44e34fdb080ff9278708ea7b49a5f49"
 
   url "https://github.com/tarnish233/cloudot/releases/download/v#{version}/Cloudot-#{version}.dmg"
   name "cloudot"
