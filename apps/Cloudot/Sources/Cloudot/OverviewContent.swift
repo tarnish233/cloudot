@@ -15,8 +15,7 @@ struct OverviewContent: View {
                 onApply: apply
             )
 
-            Label("同步概况", systemImage: "chart.bar")
-                .font(.headline)
+            SectionHeader(title: "同步概况", symbol: "chart.bar.fill")
 
             metrics
 

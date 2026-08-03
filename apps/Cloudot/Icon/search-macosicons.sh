@@ -10,19 +10,28 @@
 set -euo pipefail
 : "${MACOSICONS_API_KEY:?请先 export MACOSICONS_API_KEY}"
 
-for q in "$@"; do
-  echo "== $q"
-  curl -sS -X POST https://api.macosicons.com/api/search \
+# 过滤脚本写成独立文件而不是 `python3 -c '...'`：内联的话 shell 引号和 Python
+# 引号会打架（fish 尤其会改写内层引号），实测报 SyntaxError。
+FILTER="$(mktemp -t macosicons-filter).py"
+trap 'rm -f "$FILTER"' EXIT
+cat > "$FILTER" <<'PY'
+import json, sys
+data = json.load(sys.stdin)
+print("  共 %d 个结果" % data.get("totalHits", 0))
+hits = sorted(data.get("hits", []), key=lambda h: -(h.get("downloads") or 0))
+for hit in hits[:10]:
+    print("  %6d  %-38s @%s" % (
+        hit.get("downloads") or 0, hit.get("appName", "")[:38], hit.get("usersName")))
+    print("          %s" % hit.get("lowResPngUrl"))
+PY
+
+for query in "$@"; do
+  echo "== ${query}"
+  # 端点是 /api/v1/search —— 不带 v1 的旧路径现在 404。
+  curl -sS -X POST https://api.macosicons.com/api/v1/search \
     -H "Content-Type: application/json" \
     -H "x-api-key: $MACOSICONS_API_KEY" \
-    -d "{\"query\":\"$q\",\"searchOptions\":{\"hitsPerPage\":20,\"page\":1}}" \
+    -d "{\"query\":\"${query}\",\"searchOptions\":{\"hitsPerPage\":20,\"page\":1}}" \
     --max-time 25 \
-  | python3 -c '
-import json,sys
-d = json.load(sys.stdin)
-print(f"  共 {d.get(\"totalHits\",0)} 个结果")
-for h in sorted(d.get("hits",[]), key=lambda x: -(x.get("downloads") or 0))[:10]:
-    print(f"  {h.get(\"downloads\",0):>6}  {h[\"appName\"]:<38} @{h.get(\"usersName\")}")
-    print(f"          {h.get(\"lowResPngUrl\")}")
-'
+  | python3 "$FILTER"
 done

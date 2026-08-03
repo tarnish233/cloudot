@@ -1,5 +1,4 @@
 import AppKit
-import ImageIO
 import Foundation
 import XCTest
 
@@ -225,161 +224,91 @@ final class ContractTests: XCTestCase {
     }
 }
 
-/// 代码绘制的小机器人动效。
+/// 菜单栏静态图标。
+///
+/// 这些是**编译器管不到**的不变量：`switch` 已经保证每个状态都有符号名，但符号名写错、
+/// 或者某个符号在部署目标上根本不存在，都只在运行时表现成「菜单栏空了一块」——
+/// 一个不报错、只会消失的故障。
 @MainActor
-final class RobotAnimatorTests: XCTestCase {
-    private let allStates: [AppModel.IconState] =
-        [.healthy, .pending, .refreshing, .syncing, .broken, .unavailable]
+final class MenuBarIconTests: XCTestCase {
 
-    private func png(_ image: NSImage) -> Data? {
-        guard let tiff = image.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff) else { return nil }
-        return rep.representation(using: .png, properties: [:])
-    }
-
-    // MARK: - 序列结构
-
-    func testEveryStateHasFrames() {
-        for state in allStates {
-            XCTAssertFalse(RobotAnimator.resting(for: state).frames.isEmpty,
-                           "\(state) 没有帧，菜单栏会空白")
+    /// 遍历 allCases 而不是手写数组：以后加第七个状态，这条会自动覆盖到。
+    func testEveryStateResolvesToAnImage() {
+        for state in AppModel.IconState.allCases {
+            XCTAssertNotNil(MenuBarIcon.image(for: state),
+                            "\(state) 的符号 \(state.symbol) 在本机解析不出来")
         }
     }
 
-    func testLoopingIsCorrect() {
-        XCTAssertTrue(RobotAnimator.idle.loops)
-        XCTAssertTrue(RobotAnimator.pending.loops)
-        XCTAssertTrue(RobotAnimator.refreshing.loops)
-        XCTAssertTrue(RobotAnimator.working.loops)
-        XCTAssertFalse(RobotAnimator.broken.loops)
-        XCTAssertFalse(RobotAnimator.offline.loops)
-        XCTAssertFalse(RobotAnimator.success.loops, "一次性动效不能循环")
-        XCTAssertFalse(RobotAnimator.failure.loops, "一次性动效不能循环")
-    }
-
-    func testRefreshHasAVisibleScanAnimation() throws {
-        let frames = RobotAnimator.refreshing.frames
-        let datas = try frames.map { try XCTUnwrap(png($0)) }
-        XCTAssertGreaterThan(Set(datas).count, 6, "刷新时眼睛没有真正扫描")
-        XCTAssertEqual(RobotAnimator.refreshing.interval, 0.08, accuracy: 0.001)
-    }
-
-    /// 尺寸恒定，否则菜单栏项本身会跟着动画跳动。
-    func testAllFramesShareCanvasSize() {
-        let sequences = [
-            RobotAnimator.idle, RobotAnimator.pending, RobotAnimator.refreshing,
-            RobotAnimator.working, RobotAnimator.broken, RobotAnimator.offline,
-            RobotAnimator.success, RobotAnimator.failure,
-        ]
-        for seq in sequences {
-            for frame in seq.frames {
-                XCTAssertEqual(frame.size, RobotAnimator.canvasSize)
-            }
-        }
-        XCTAssertGreaterThan(RobotAnimator.canvasSize.width, RobotAnimator.canvasSize.height)
-        XCTAssertEqual(RobotAnimator.canvasSize.height, RobotAnimator.barHeight, accuracy: 0.01)
-    }
-
-    /// template 让 AppKit 在深色菜单栏使用白色，在浅色菜单栏自动反转。
-    func testEveryFrameUsesSystemTemplateRendering() {
-        let sequences = [
-            RobotAnimator.idle, RobotAnimator.pending, RobotAnimator.refreshing,
-            RobotAnimator.working, RobotAnimator.broken, RobotAnimator.offline,
-            RobotAnimator.success, RobotAnimator.failure,
-        ]
-        for frame in sequences.flatMap(\.frames) {
-            XCTAssertTrue(frame.isTemplate)
+    func testEveryPulseResolvesToAnImage() {
+        for kind in AppModel.IconPulse.Kind.allCases {
+            XCTAssertNotNil(MenuBarIcon.image(for: kind),
+                            "\(kind) 的符号 \(kind.symbol) 在本机解析不出来")
         }
     }
 
-    func testBrokenDiffersFromIdle() throws {
-        XCTAssertNotEqual(try XCTUnwrap(png(RobotAnimator.broken.frames[0])),
-                          try XCTUnwrap(png(RobotAnimator.idle.frames[0])))
-    }
-
-    func testOfflineDiffersFromIdle() throws {
-        XCTAssertNotEqual(try XCTUnwrap(png(RobotAnimator.offline.frames[0])),
-                          try XCTUnwrap(png(RobotAnimator.idle.frames[0])))
-    }
-
-    func testSuccessHasMotionAndReturnsToNeutral() throws {
-        let frames = RobotAnimator.success.frames
-        let datas = try frames.map { try XCTUnwrap(png($0)) }
-        XCTAssertGreaterThan(Set(datas).count, 4, "成功动画没有动起来")
-        XCTAssertEqual(try XCTUnwrap(png(frames.last!)),
-                       try XCTUnwrap(png(RobotAnimator.idle.frames[0])))
-    }
-
-    func testFailureHasMotionAndReturnsToNeutral() throws {
-        let frames = RobotAnimator.failure.frames
-        let datas = try frames.map { try XCTUnwrap(png($0)) }
-        XCTAssertGreaterThan(Set(datas).count, 5, "失败动画没有摇头")
-        XCTAssertEqual(try XCTUnwrap(png(frames.last!)),
-                       try XCTUnwrap(png(RobotAnimator.idle.frames[0])))
-    }
-
-    func testPulseMapsToOneShot() {
-        XCTAssertEqual(RobotAnimator.oneShot(for: .success).frames.count,
-                       RobotAnimator.success.frames.count)
-        XCTAssertEqual(RobotAnimator.oneShot(for: .failure).frames.count,
-                       RobotAnimator.failure.frames.count)
-    }
-
-    func testSequencesAreMemoized() {
-        for (a, b) in zip(RobotAnimator.refreshing.frames, RobotAnimator.refreshing.frames) {
-            XCTAssertTrue(a === b, "帧没缓存，动画路径上仍在重新合成")
+    /// template 让 AppKit 在深色菜单栏用白色、浅色菜单栏自动反转。
+    /// `withSymbolConfiguration` 返回的是新实例，`isTemplate` 特别容易在那一步丢掉。
+    func testEveryImageIsTemplate() throws {
+        for state in AppModel.IconState.allCases {
+            XCTAssertTrue(try XCTUnwrap(MenuBarIcon.image(for: state)).isTemplate, "\(state)")
+        }
+        for kind in AppModel.IconPulse.Kind.allCases {
+            XCTAssertTrue(try XCTUnwrap(MenuBarIcon.image(for: kind)).isTemplate, "\(kind)")
         }
     }
 
-    /// 导出动图预览，方便肉眼验收动效。默认不跑 ——
-    /// 设 CLOUDOT_WRITE_PREVIEW=1 才写文件。
-    func testWritePreviewGIFs() throws {
-        try XCTSkipIf(ProcessInfo.processInfo.environment["CLOUDOT_WRITE_PREVIEW"] == nil)
-        let named: [(String, RobotAnimationSequence)] = [
-            ("1-正常", RobotAnimator.idle),
-            ("2-待同步", RobotAnimator.pending),
-            ("3-刷新", RobotAnimator.refreshing),
-            ("4-同步中", RobotAnimator.working),
-            ("5-同步成功", RobotAnimator.success),
-            ("6-同步失败", RobotAnimator.failure),
-            ("7-有损坏", RobotAnimator.broken),
-            ("8-找不到CLI", RobotAnimator.offline),
-        ]
-        for (name, seq) in named {
-            try writeGIF(seq, to: "/tmp/cloudot-robot/\(name).gif")
+    /// squareLength 把菜单栏项固定成正方形，比它宽的符号会被裁掉 ——
+    /// 这批里 `icloud.slash` 最宽，字号一往上调就先撞它。
+    func testNoSymbolOverflowsTheSquareItem() throws {
+        let limit = NSStatusBar.system.thickness
+        try XCTSkipIf(limit <= 0, "拿不到菜单栏高度（无窗口服务器）")
+        for state in AppModel.IconState.allCases {
+            let size = try XCTUnwrap(MenuBarIcon.image(for: state)).size
+            XCTAssertLessThanOrEqual(size.width, limit, "\(state)（\(state.symbol)）会被裁掉")
+            XCTAssertLessThanOrEqual(size.height, limit, "\(state)（\(state.symbol)）比菜单栏还高")
         }
-        print("PREVIEW-WRITTEN /tmp/cloudot-robot")
     }
 
-    /// 放大 8 倍写成循环动图，方便肉眼验收 18pt 里的细节。
-    private func writeGIF(_ seq: RobotAnimationSequence, to path: String) throws {
-        try FileManager.default.createDirectory(
-            atPath: (path as NSString).deletingLastPathComponent,
-            withIntermediateDirectories: true)
-        let scale: CGFloat = 8
-        let size = NSSize(width: RobotAnimator.canvasSize.width * scale,
-                          height: RobotAnimator.canvasSize.height * scale)
-        let url = URL(filePath: path)
-        guard let dest = CGImageDestinationCreateWithURL(
-            url as CFURL, "com.compuserve.gif" as CFString, seq.frames.count, nil) else { return }
-        CGImageDestinationSetProperties(dest, [
-            kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0],
-        ] as CFDictionary)
-        for frame in seq.frames {
-            let big = NSImage(size: size)
-            big.lockFocus()
-            NSColor(white: 0.13, alpha: 1).setFill()
-            NSRect(origin: .zero, size: size).fill()
-            NSGraphicsContext.current?.imageInterpolation = .high
-            frame.draw(in: NSRect(origin: .zero, size: size))
-            big.unlockFocus()
-            guard let cg = big.cgImage(forProposedRect: nil, context: nil, hints: nil)
-            else { continue }
-            CGImageDestinationAddImage(dest, cg, [
-                kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: seq.interval],
-            ] as CFDictionary)
+    /// 「有改动等着你同步」必须和别的状态长得不一样 ——
+    /// 这是菜单栏唯一真正要传达的区别：**要不要我动手**。
+    func testPendingIsNotConfusableWithAnythingElse() {
+        let others = AppModel.IconState.allCases
+            .filter { $0 != .pending }
+            .map(\.symbol)
+        XCTAssertFalse(others.contains(AppModel.IconState.pending.symbol),
+                       "待同步撞了别的状态：\(AppModel.IconState.pending.symbol)")
+    }
+
+    /// 菜单栏只在**需要你做事**时才改形状。
+    ///
+    /// healthy / refreshing / syncing 刻意共用常态那个同步环：静态图标区分不了
+    /// 「在跑」，而那件事由面板里的 ProgressView 和 tooltip 负责说。把「刻意」
+    /// 断言下来，免得以后有人当成漏了去「修」。
+    func testInFlightSharesTheRestingSymbol() {
+        XCTAssertEqual(AppModel.IconState.refreshing.symbol, AppModel.IconState.healthy.symbol)
+        XCTAssertEqual(AppModel.IconState.syncing.symbol, AppModel.IconState.healthy.symbol)
+    }
+
+    /// 需要你处理的三种状态之间不能撞脸 —— 它们对应三种不同的处置。
+    func testActionableStatesLookDistinct() {
+        let actionable: [AppModel.IconState] = [.healthy, .pending, .broken, .unavailable]
+        XCTAssertEqual(Set(actionable.map(\.symbol)).count, actionable.count,
+                       "有状态撞了图标：\(actionable.map(\.symbol))")
+    }
+
+    /// 常态图标要和 App 图标同源。`Icon/make-icon.swift` 画的就是这个符号，
+    /// 改任何一边都得同时改另一边，否则菜单栏和 Finder 里会是两个东西。
+    func testRestingSymbolMatchesTheAppIcon() {
+        XCTAssertEqual(AppModel.IconState.healthy.symbol, "arrow.triangle.2.circlepath")
+    }
+
+    /// 结果反馈不能和任何常驻姿态撞脸，否则那 0.7 秒看不出发生过事。
+    func testPulseSymbolsDifferFromEveryRestingSymbol() {
+        let resting = Set(AppModel.IconState.allCases.map(\.symbol))
+        for kind in AppModel.IconPulse.Kind.allCases {
+            XCTAssertFalse(resting.contains(kind.symbol), "\(kind) 和某个常驻状态同图标")
         }
-        CGImageDestinationFinalize(dest)
     }
 }
 
@@ -387,7 +316,7 @@ final class RobotAnimatorTests: XCTestCase {
 /// 自动刷新的节流策略。
 ///
 /// 这些是「看不见」的行为 —— 间隔被人不小心改回 20 秒、或者后台刷新又开始驱动
-/// 菜单栏动画，界面上都不会报错，只会变得费电又晃眼。所以用测试钉住。
+/// 菜单栏图标，界面上都不会报错，只会变得费电又晃眼。所以用测试钉住。
 @MainActor
 final class RefreshPolicyTests: XCTestCase {
     /// 轮询间隔要足够长。
@@ -409,24 +338,18 @@ final class RefreshPolicyTests: XCTestCase {
         XCTAssertEqual(Duration.milliseconds(1500).timeInterval, 1.5, accuracy: 0.001)
     }
 
-    /// 后台刷新不进 `.refreshing` 状态，菜单栏因此不会播扫眼动画。
+    /// 后台刷新不进 `.refreshing` 状态。
     ///
-    /// 原来的问题不只是「晃」：`refreshing` 是 12 帧 ×80ms = 0.96s，而一次刷新
-    /// 只要约 0.17s，动画连一轮都播不完就被打断 —— 看起来是眼睛歪一下又弹回去。
-    func testBackgroundRefreshDoesNotAnimate() async {
+    /// 这条现在钉的是**状态机**，不是图标 —— `refreshing` 和 `healthy` 已经共用
+    /// 同一个符号，所以图标本来就不会变。但状态本身还是要分清：`isBusy` 驱动着
+    /// 面板里的 ProgressView 和「刷新/同步」按钮的禁用，每 20 秒闪一下同样烦人。
+    func testBackgroundRefreshDoesNotEnterRefreshingState() async {
         let model = AppModel()
         // 找不到 CLI 时状态恒为 unavailable，测不出东西
         try? XCTSkipIf(model.locateError != nil, "本机没装 cloudot")
 
         await model.refresh()                      // 后台刷新（默认）
         XCTAssertNotEqual(model.iconState, .refreshing,
-                          "后台刷新不该驱动菜单栏动画")
-    }
-
-    /// `refreshing` 这个状态本身仍然要有动画 —— 用户点刷新时得有反馈。
-    func testRefreshingStateStillHasAnimation() {
-        let seq = RobotAnimator.resting(for: .refreshing)
-        XCTAssertGreaterThan(seq.frames.count, 1, "手动刷新应当有动画反馈")
-        XCTAssertTrue(seq.loops, "刷新时长不确定，动画要能循环")
+                          "后台刷新不该进 refreshing 状态")
     }
 }

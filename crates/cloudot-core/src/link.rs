@@ -139,8 +139,7 @@ pub fn adopt_file(
                 ));
             }
             backup = Some(backup_file(layout, target, stamp)?);
-            fs::remove_file(target)
-                .with_context(|| format!("删除 {} 失败", target.display()))?;
+            fs::remove_file(target).with_context(|| format!("删除 {} 失败", target.display()))?;
         }
         make_link(target, store)?;
         return Ok(AdoptReport {
@@ -159,8 +158,7 @@ pub fn adopt_file(
     // 常规路径：本地有配置，store 是空的。
     let backup = backup_file(layout, target, stamp)?;
     if let Some(parent) = store.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("创建 {} 失败", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("创建 {} 失败", parent.display()))?;
     }
     move_file(target, store)?;
     make_link(target, store)?;
@@ -249,20 +247,17 @@ pub fn backup_file(layout: &Layout, target: &Path, stamp: &str) -> Result<PathBu
         fs::create_dir_all(parent)
             .with_context(|| format!("创建备份目录 {} 失败", parent.display()))?;
     }
-    fs::copy(target, &dest).with_context(|| {
-        format!("备份 {} 到 {} 失败", target.display(), dest.display())
-    })?;
+    fs::copy(target, &dest)
+        .with_context(|| format!("备份 {} 到 {} 失败", target.display(), dest.display()))?;
     Ok(dest)
 }
 
 fn make_link(target: &Path, store: &Path) -> Result<()> {
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("创建 {} 失败", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("创建 {} 失败", parent.display()))?;
     }
-    std::os::unix::fs::symlink(store, target).with_context(|| {
-        format!("建立软链 {} -> {} 失败", target.display(), store.display())
-    })
+    std::os::unix::fs::symlink(store, target)
+        .with_context(|| format!("建立软链 {} -> {} 失败", target.display(), store.display()))
 }
 
 /// 优先 rename（保留权限与时间戳），跨卷时退化为 copy + remove。

@@ -149,7 +149,11 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             } else {
                 println!(
                     "{} {}",
-                    if out.already { "已更新" } else { "已初始化" },
+                    if out.already {
+                        "已更新"
+                    } else {
+                        "已初始化"
+                    },
                     out.root.display()
                 );
                 println!("  设备    {}", out.device);
@@ -362,11 +366,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                         println!("没有需要清理的备份（保留 {keep} 份）。");
                     } else {
                         for e in &out.removed {
-                            println!(
-                                "  已删除 {:<18} {}",
-                                e.stamp,
-                                backups::human_bytes(e.bytes)
-                            );
+                            println!("  已删除 {:<18} {}", e.stamp, backups::human_bytes(e.bytes));
                         }
                         println!(
                             "\n清理 {} 份，释放 {}，保留 {} 份。",

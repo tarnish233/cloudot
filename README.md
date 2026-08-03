@@ -4,11 +4,27 @@ macOS 配置同步器。通过 git 在多台 Mac 之间同步 dotfiles，所有�
 
 当前纳管 **ghostty · fish · karabiner · gitpic**，只支持 **git** 后端。后续按需扩展。
 
+## 安装
+
+```bash
+brew install --cask tarnish233/tap/cloudot
+```
+
+一条命令装齐菜单栏 GUI 和 `cloudot` 命令 —— CLI 就在 .app 里面，Cask 顺手链到 PATH。
+
+装完先跑一次（没有 Apple 开发者签名，不跑的话 GUI 打不开、`cloudot` 命令也会被系统杀掉）：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Cloudot.app
+```
+
+也可以从 [Releases](https://github.com/tarnish233/cloudot/releases) 直接下 DMG，
+或者只装 CLI：`cargo install --path crates/cloudot-cli`。
+分发细节见 [apps/Cloudot/dist/README.md](apps/Cloudot/dist/README.md)。
+
 ## 快速开始
 
 ```bash
-cargo install --path crates/cloudot-cli    # 装到 ~/.cargo/bin
-
 # 第一台机器
 cloudot init --remote git@github.com:<you>/dotfiles.git
 cloudot add ghostty        # 备份 → 移进 store → 建软链
@@ -148,26 +164,41 @@ open build/Cloudot.app
 ./test.sh              # Swift 契约与界面测试（需要 Xcode 提供 XCTest）
 ```
 
-主窗口从菜单栏面板的「设置」进入，分**概览 / 应用 / 体检 / 备份**四个页面。
+主窗口从菜单栏面板的「设置」进入，分**概览 / 应用 / 体检 / 备份 / 关于**五个页面。
+
+「关于」页把 App 和 CLI 的版本并排显示，版本对不上时 CLI 那行标黄 —— 两边分叉时界面
+只会报「输出异常」，很难一眼看出是版本问题。它同时显示**实际在调用的 CLI 路径**
+（可能是 bundle 内自带的、`~/.cargo/bin` 里的，或 `defaults write` 指定的），
+并检查有没有新版本、提供一键更新。App 的版本号由 `make-app.sh` 从 workspace 的
+`Cargo.toml` 读，不另写一份。
 
 ### 菜单栏图标
 
-菜单栏使用代码绘制的圆角小机器人。所有帧都是 **template image**：源图用白色绘制，
-深色菜单栏显示为白色，浅色菜单栏则由 AppKit 自动反转，避免固定白色在浅色背景上消失。
+菜单栏用系统自带的 SF Symbol，静态、无动画。所有图标都是 **template image**：
+深色菜单栏显示为白色，浅色菜单栏由 AppKit 自动反转，避免固定白色在浅色背景上消失。
 
-| 状态 | 机器人动作 |
+| 状态 | 图标 |
 |---|---|
-| 正常 | 安静待机，约四秒自然眨一次眼 |
-| 待同步 | 只有天线发出一圈短促提示，不持续跳动 |
-| 刷新中 | 双眼左右扫描，天线随扫描方向摆动 |
-| 同步中 | 两只机械臂交替工作，机身轻微起伏 |
-| 同步成功 / 失败 | 短促跳跃笑脸 / 叉眼摇头，播完回到当前状态 |
-| 有损坏 | 叉眼、皱眉、歪头的静态姿态 |
-| 找不到 CLI | 天线垂下并闭眼，整体降低不透明度 |
+| 正常 / 刷新中 / 同步中 | `arrow.triangle.2.circlepath`（和 App 图标同一个符号） |
+| 待同步 | `arrow.up.arrow.down` |
+| 有损坏 | `exclamationmark.triangle.fill` |
+| 找不到 CLI | `icloud.slash` |
+| 同步成功 / 失败 | `checkmark.circle.fill` / `xmark.octagon.fill`，停留 0.7 秒后回到当前状态 |
 
-动画会遵守 macOS 的“减少动态效果”辅助功能设置；开启后只显示对应静态姿态。
+早先这里是一个代码绘制的小机器人，有眨眼、扫描、机械臂等一整套逐帧动效。换掉是因为
+它和系统的视觉语言不搭，而菜单栏是每天都要看的地方 —— 一个安静的系统符号比一个会动
+的吉祥物更耐看，也更容易一眼读出状态。
+
+**菜单栏只在需要你做事时才改形状。** 常态就是 App 图标那个双箭头同步环 —— 同一个
+SF Symbol，菜单栏和 Finder 里认的是同一个东西。刷新中和同步中也共用它：静态图标本来
+就区分不了「在跑」，而那件事由面板里的转圈和跟着状态走的 tooltip 负责说，菜单栏不必
+再表一次态。真正需要图标变形的只有「要你动手」（待同步）和「出事了」（损坏 / 找不到 CLI）。
+
+菜单栏没有动画，所以也没有「减少动态效果」的降级处理。成功/失败那 0.7 秒的换图是
+离散的状态指示，不是动效 —— 没有位移、没有插值，该辅助功能设置管不到它。
 
 应用图标见 [Icon/README.md](apps/Cloudot/Icon/README.md)，由 CoreGraphics 绘制，不使用第三方素材。
+它的 glyph 和菜单栏「同步中」是**同一个** `arrow.triangle.2.circlepath`。
 应用图标不支持深浅色自适应——`.icns` 无变体概念，appiconset 的 dark 图会被 `actool`
 静默丢弃，macOS 26 的自适应要靠只有 GUI 的 Icon Composer。菜单栏图标不受影响，
 它是单色 template 渲染，本来就跟随系统外观。
@@ -176,9 +207,14 @@ open build/Cloudot.app
 
 **GUI 只是 CLI 的 JSON 消费者。** 起进程跑 `cloudot --json`，不复用 Rust 的 core：进程隔离，界面崩了动不到你的配置，而且这套 JSON 本来就是为三端共用设计的。任何一次改动操作之后一定重新拉 `status`，界面绝不自己推测新状态。
 
-**`--force` 和 `--allow-secrets` 刻意不进 GUI。** 这两个开关真能丢数据或把凭据推进 git，误点的代价比在终端里敲错命令高得多。GUI 遇到这类错误时，会按错误分类把该敲的命令直接显示出来让你复制。其余破坏性操作（纳管、退出纳管、清理备份）走确认对话框。
+**`--force` 和 `--allow-secrets` 刻意不进 GUI。** 这两个开关真能丢数据或把凭据推进 git，误点的代价比在终端里敲错命令高得多。GUI 遇到这类错误时，会按错误分类把该敲的命令直接显示出来让你复制。其余破坏性操作（纳管、退出纳管、清理备份、安装更新）走确认对话框。
 
 **自动只读、手动写。** 同步永远要你点。
+
+**GUI 自更新是下载 DMG 替换自己**，不判断安装来源、不在界面里跑 brew。版本发现走
+`releases/latest` 的 302 重定向（不用有速率限制的 GitHub API），装完问你要不要重启，
+不静默拉起新进程。Homebrew 用户想用 `brew upgrade --cask cloudot` 升级就自己在终端跑。
+不用 Sparkle 的理由和替换顺序见 [dist/README.md](apps/Cloudot/dist/README.md)。
 
 状态刷新靠 **FSEvents**：配置文件真的变了才刷，没变化零开销。原来是每 20 秒轮询一次，每小时白起 720 个进程——而轮询其实发现不了远端改动（`status` 读的是本地缓存的 `@{upstream}` ref，**不 fetch**），唯一能新发现的就是「本机改了配置」，而那件事文件系统会主动告诉我们。另留一天一次的兜底轮询，防 FSEvents 漏事件（休眠期间的变化、监视目录被整个移走）。
 
@@ -193,7 +229,7 @@ open build/Cloudot.app
 ```bash
 cargo test              # 66 个 Rust 单元测试
 ./e2e.sh                # 40 项端到端断言
-apps/Cloudot/test.sh    # Swift 测试（契约 + 菜单栏机器人不变量）
+apps/Cloudot/test.sh    # Swift 测试（契约 + 菜单栏图标 + 自更新；64 个，5 个默认跳过）
 ```
 
 `e2e.sh` 在 `/tmp/cloudot-e2e` 下用假 `HOME` 模拟两台机器 + 一个 bare remote，完全不碰真实的 `~/.config` 和 `~/.cloudot`。覆盖：
@@ -221,4 +257,4 @@ cloudot --json doctor  > apps/Cloudot/Tests/CloudotTests/Fixtures/doctor.json
 
 ## 还没做
 
-按优先级：其余应用的 adopter（zsh / zed 等）· secret 扫描与 age 加密 · daemon（后台自动同步）· agent skill 与 MCP · 公证 DMG 与 homebrew tap。
+按优先级：其余应用的 adopter（zsh / zed 等）· secret 扫描与 age 加密 · daemon（后台自动同步）· agent skill 与 MCP · 正式签名与公证（现在是 adhoc，用户得手动去掉隔离属性）。

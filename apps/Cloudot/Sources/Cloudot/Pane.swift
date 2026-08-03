@@ -1,7 +1,7 @@
 import Foundation
 
 enum Pane: String, CaseIterable, Hashable, Identifiable {
-    case overview, apps, doctor, backups
+    case overview, apps, doctor, backups, about
 
     var id: Self { self }
 
@@ -11,6 +11,7 @@ enum Pane: String, CaseIterable, Hashable, Identifiable {
         case .apps: "应用"
         case .doctor: "体检"
         case .backups: "备份"
+        case .about: "关于"
         }
     }
 
@@ -20,6 +21,7 @@ enum Pane: String, CaseIterable, Hashable, Identifiable {
         case .apps: "查看和管理已发现的应用配置"
         case .doctor: "检查配置、仓库与运行环境"
         case .backups: "查看自愈所依赖的本地备份"
+        case .about: "版本、路径与项目信息"
         }
     }
 
@@ -33,6 +35,7 @@ enum Pane: String, CaseIterable, Hashable, Identifiable {
         case .apps: "app.badge"
         case .doctor: "stethoscope"
         case .backups: "clock.arrow.circlepath"
+        case .about: "info.circle"
         }
     }
 }

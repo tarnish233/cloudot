@@ -6,15 +6,7 @@ struct DoctorCheckSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: CloudotTheme.compactSpacing) {
-            HStack(spacing: 6) {
-                Label(category.title, systemImage: category.symbol)
-                    .font(.headline)
-
-                Text(checks.count, format: .number)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-            .accessibilityElement(children: .combine)
+            SectionHeader(title: category.title, symbol: category.symbol, count: checks.count)
 
             GroupBox {
                 VStack(spacing: 0) {

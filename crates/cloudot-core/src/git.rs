@@ -131,8 +131,9 @@ impl Git {
 
     /// 相对 upstream 的 (ahead, behind)；没有 upstream 时返回 None。
     pub fn ahead_behind(&self) -> Option<(u32, u32)> {
-        let (ok, out, _) =
-            self.try_run(&["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]).ok()?;
+        let (ok, out, _) = self
+            .try_run(&["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
+            .ok()?;
         if !ok {
             return None;
         }

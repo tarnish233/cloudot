@@ -20,6 +20,30 @@ struct MenuBarFooter: View {
                 .disabled(model.isBusy)
             }
 
+            // 更新相关的行只在真有事时出现，和上面「修复并落地」一个路子 ——
+            // 常驻一个多数时候没用的按钮会挤掉三联那排的标签（面板只有 340pt 宽）。
+            if let version = model.pendingRestartVersion {
+                Button(action: model.restartForUpdate) {
+                    Label("重启以启用 \(version)", systemImage: "arrow.clockwise.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .help("更新已装好，重启应用后生效")
+            } else if let check = model.updateCheck, check.isAvailable {
+                // 用 `.description`：SemanticVersion 直接插进 LocalizedStringKey 会走
+                // debug description 那条弃用路径，文案里也可能不是用户看到的版本号。
+                let latest = check.latest.description
+                Button(action: startUpdate) {
+                    Label("更新到 \(latest)", systemImage: "arrow.down.circle.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .help("下载并安装 \(latest)，装完需要重启应用")
+                .disabled(model.isBusy)
+            }
+
             HStack(spacing: CloudotTheme.compactSpacing) {
                 Button(action: openMainWindow) {
                     Label("设置", systemImage: "macwindow")
@@ -86,6 +110,14 @@ struct MenuBarFooter: View {
         }
     }
 
+    private func startUpdate() {
+        guard let check = model.updateCheck else { return }
+        model.pending = .installUpdate(
+            from: check.current.description,
+            to: check.latest.description
+        )
+    }
+
     private func apply() {
         Task {
             await model.apply()
@@ -94,7 +126,7 @@ struct MenuBarFooter: View {
 
     private func refresh() {
         Task {
-            // 用户主动点的，菜单栏机器人才扫眼 —— 动效要对应得上操作
+            // 用户主动点的，菜单栏图标才变 —— 反馈要对应得上操作
             await model.refresh(userInitiated: true)
         }
     }

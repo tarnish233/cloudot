@@ -105,11 +105,17 @@ impl Layout {
             return Err(unsupported("不能纳管家目录本身".to_owned()));
         }
         if rel.components().any(|c| c.as_os_str() == "..") {
-            return Err(unsupported(format!("路径不能包含 ..：{}", target.display())));
+            return Err(unsupported(format!(
+                "路径不能包含 ..：{}",
+                target.display()
+            )));
         }
         // 不用 display()：非 UTF-8 路径会被替换字符悄悄改写成另一个路径
         let rel = rel.to_str().ok_or_else(|| {
-            unsupported(format!("路径不是合法 UTF-8，暂不支持：{}", target.display()))
+            unsupported(format!(
+                "路径不是合法 UTF-8，暂不支持：{}",
+                target.display()
+            ))
         })?;
         Ok(format!("files/{rel}"))
     }

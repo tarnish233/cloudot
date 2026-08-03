@@ -85,6 +85,18 @@ struct CloudotCLI: Sendable {
         try await call(["backups"], as: BackupSet.self)
     }
 
+    /// CLI 自报的版本号，形如 `cloudot 0.2.0`，取后半段。
+    ///
+    /// 不走 `call(_:as:)`：`--version` 是 clap 的内建输出，纯文本，不套 JSON 信封。
+    /// 拿不到就返回 nil —— 「关于」页显示不出版本无关紧要，不值得为它抛错。
+    func version() async -> String? {
+        guard let output = try? await Self.execute(executable, ["--version"]),
+              let text = String(data: output.stdout, encoding: .utf8)
+        else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.split(separator: " ").last.map(String.init) ?? nil
+    }
+
     // MARK: - 改动
 
     func sync() async throws -> SyncResult {

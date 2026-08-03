@@ -46,10 +46,8 @@ pub(crate) mod testutil {
     impl TempHome {
         pub fn new(tag: &str) -> Self {
             let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "cloudot-test-{}-{tag}-{seq}",
-                std::process::id()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("cloudot-test-{}-{tag}-{seq}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).expect("建临时家目录");
             Self { path }

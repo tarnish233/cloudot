@@ -3,18 +3,20 @@ import Observation
 
 /// 需要用户点头才执行的破坏性操作。
 ///
-/// `--force` / `--allow-secrets` 这类真能丢数据或泄凭据的开关刻意不进 GUI，
-/// 所以这里只有三种：纳管、退出纳管、清理备份。
+/// `--force` / `--allow-secrets` 这类真能丢数据或泄凭据的开关刻意不进 GUI。
+/// 更新也走这条路：它会把 .app 整个换掉，还得重启进程。
 enum PendingAction: Identifiable {
     case adopt(id: String, name: String)
     case unadopt(id: String, name: String)
     case pruneBackups(keep: Int, willRemove: Int)
+    case installUpdate(from: String, to: String)
 
     var id: String {
         switch self {
         case .adopt(let id, _): "adopt-\(id)"
         case .unadopt(let id, _): "unadopt-\(id)"
         case .pruneBackups(let keep, _): "prune-\(keep)"
+        case .installUpdate(_, let to): "update-\(to)"
         }
     }
 
@@ -23,6 +25,7 @@ enum PendingAction: Identifiable {
         case .adopt(_, let name): "同步 \(name)？"
         case .unadopt(_, let name): "停止同步 \(name)？"
         case .pruneBackups: "清理旧备份？"
+        case .installUpdate(_, let to): "更新到 \(to)？"
         }
     }
 
@@ -43,6 +46,13 @@ enum PendingAction: Identifiable {
             会删掉 \(willRemove) 份旧备份，保留最近 \(keep) 份。
             备份是配置自愈时的兜底数据源，删掉就不可恢复了。
             """
+        case .installUpdate(let from, let to):
+            """
+            会下载 \(to) 的安装包，校验之后替换掉当前这个 Cloudot.app（现在是 \(from)）。
+            装完需要重启应用才生效，届时会问你。你的配置和备份不受影响。
+            如果是用 Homebrew 装的，brew 那边的版本记录会暂时对不上 —— 下次
+            `brew upgrade --cask cloudot` 会重装成同样的新版，不会退回旧版。
+            """
         }
     }
 
@@ -51,12 +61,13 @@ enum PendingAction: Identifiable {
         case .adopt: "同步"
         case .unadopt: "停止同步"
         case .pruneBackups: "删除"
+        case .installUpdate: "更新"
         }
     }
 
     var isDestructive: Bool {
         switch self {
-        case .adopt: false
+        case .adopt, .installUpdate: false
         case .unadopt, .pruneBackups: true
         }
     }
@@ -75,6 +86,9 @@ struct Banner: Identifiable {
     /// 出错的对象（应用 id）。有它才能把引导命令拼成可直接复制的形式，
     /// 而不是让用户自己把 `<应用>` 换掉。
     let subject: String?
+    /// 直接给定的引导内容。`kind` 是从 Rust CLI 解码出来的分类，只覆盖 cloudot 自己的
+    /// 错误；更新这类 GUI 本地的失败没有对应的 `kind`，用这个字段把该看的东西传下去。
+    var hint: String?
 
     static func ok(_ title: String, _ detail: String? = nil) -> Banner {
         Banner(tone: .success, title: title, detail: detail, kind: nil, subject: nil)
@@ -82,6 +96,12 @@ struct Banner: Identifiable {
 
     static func warn(_ title: String, _ detail: String? = nil) -> Banner {
         Banner(tone: .warning, title: title, detail: detail, kind: nil, subject: nil)
+    }
+
+    /// GUI 本地产生的失败（更新之类），不经过 Rust CLI 的错误信封。
+    static func fail(_ title: String, _ detail: String? = nil, hint: String? = nil) -> Banner {
+        Banner(tone: .failure, title: title, detail: detail,
+               kind: nil, subject: nil, hint: hint)
     }
 
     static func from(_ error: Error, subject: String? = nil) -> Banner {
@@ -93,6 +113,9 @@ struct Banner: Identifiable {
                 kind: e.kind,
                 subject: subject
             )
+        }
+        if let e = error as? UpdateError {
+            return .fail(e.summary, e.errorDescription)
         }
         return Banner(
             tone: .failure,
@@ -115,7 +138,8 @@ struct Banner: Identifiable {
         case .notInitialized:
             "cloudot init --remote git@github.com:<你>/dotfiles.git"
         default:
-            nil
+            // 没有匹配的分类时回落到显式给定的那条
+            hint
         }
     }
 }
@@ -129,6 +153,22 @@ final class AppModel {
     /// 找到了 cloudot、可以执行命令。
     var isReady: Bool { cli != nil }
 
+    /// 实际在调用的 CLI 路径。GUI 可能用 bundle 内自带的那份、`~/.cargo/bin` 里的，
+    /// 或者 `defaults write` 指定的 —— 版本对不上时界面只会报「输出异常」，
+    /// 很难一眼看出是在跑哪个二进制，所以「关于」页要把它显示出来。
+    var cliPath: String? { cli?.executable.path }
+
+    /// CLI 自报的版本。按需加载（见 `loadCLIVersion`），拿不到就不显示。
+    private(set) var cliVersion: String?
+
+    /// 最近一次更新检查的结果。
+    private(set) var updateCheck: UpdateCheck?
+    /// 正在查更新。**刻意不进 `isBusy`** —— 查更新是纯网络的旁路操作，
+    /// 让它把「同步」「刷新」一起变灰是没道理的。
+    private(set) var isCheckingForUpdate = false
+    /// 更新装好了、等着重启。非 nil 时界面显示重启按钮。
+    private(set) var pendingRestartVersion: String?
+
     private(set) var status: Status?
     private(set) var doctor: DoctorReport?
     private(set) var appList: [AppListing] = []
@@ -137,9 +177,8 @@ final class AppModel {
     private(set) var isRefreshing = false
     /// 这次刷新是用户主动点的吗。
     ///
-    /// 只有主动刷新才让菜单栏机器人扫眼：后台的只读检查不该在视觉上打扰人，
-    /// 而且原来那个动画连一轮都播不完（12 帧 ×80ms 要 0.96s，刷新只要 0.17s），
-    /// 看起来就是每 20 秒眼睛歪一下又弹回去，像抽动。
+    /// 只有主动刷新才改菜单栏图标：后台的只读检查不该在视觉上打扰人。刷新只要 0.17s，
+    /// 图标会闪到「同步中」再弹回来，快到根本读不出发生了什么 —— 那不像反馈，像故障。
     private var isUserInitiatedRefresh = false
     private(set) var isWorking = false
     private(set) var lastRefresh: Date?
@@ -189,9 +228,64 @@ final class AppModel {
         }
     }
 
+    /// 读一次 CLI 版本，只给「关于」页用，所以按需拉、不进常规 refresh。
+    func loadCLIVersion() async {
+        guard cliVersion == nil, let cli else { return }
+        cliVersion = await cli.version()
+    }
+
+    /// 查一次有没有新版。幂等 —— 重开「关于」页不会重复打网络。
+    /// 失败不弹 banner：这是后台的旁路操作，用户没主动要求，报错只会打扰人。
+    func checkForUpdate() async {
+        guard updateCheck == nil, !isCheckingForUpdate else { return }
+        isCheckingForUpdate = true
+        defer { isCheckingForUpdate = false }
+        updateCheck = try? await Updater.check(current: Self.appVersion)
+    }
+
+    /// 下载并替换。装完不自动重启 —— 只把 `pendingRestartVersion` 立起来让界面问。
+    ///
+    /// 不走 `perform(subject:_:)`：那个要求 `guard let cli`，而更新恰恰要在 CLI
+    /// 缺失或版本对不上时也能用；它结尾还会 `await refresh()`，那会去 spawn 一个
+    /// bundle 刚被换掉的二进制，没意义。
+    func installUpdate() async {
+        guard let check = updateCheck, check.isAvailable, !isBusy else { return }
+        isWorking = true
+        do {
+            let dmg = try await Updater.download(check)
+            try Updater.install(dmg: dmg, expecting: check.latest)
+            let version = check.latest.description
+            pendingRestartVersion = version
+            banner = .ok("已更新到 \(version)", "重启应用后生效。")
+            emit(.success)
+        } catch {
+            var failure = Banner.from(error)
+            // 资产缺失是发布方的疏漏，用户只能去发布页看看 —— 把链接给出来
+            if case UpdateError.assetMissing = error {
+                failure.hint = check.releasePageURL.absoluteString
+            }
+            banner = failure
+            emit(.failure)
+        }
+        isWorking = false
+    }
+
+    /// 重启以用上新版本。
+    func restartForUpdate() {
+        Updater.relaunch()
+    }
+
+    /// 这个 .app 的版本号。从 bundle 读，不写死 —— 那样必然和 `make-app.sh` 分叉。
+    static let appVersion =
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+
     /// 启动文件监视 + 兜底轮询。重复调用是安全的。
     func startAutoRefresh() {
         startWatching()
+        // 启动时顺手查一次更新。幂等，失败也不弹 banner —— 菜单栏页脚和
+        // 「关于」页都靠 `updateCheck` 决定要不要显示更新按钮，只在关于页
+        // 才查的话用户永远看不到菜单栏那条入口。
+        Task { await self.checkForUpdate() }
         guard refreshLoop == nil else { return }
         refreshLoop = Task { [weak self] in
             while !Task.isCancelled {
@@ -272,7 +366,11 @@ final class AppModel {
     ///
     /// 与 `overallLevel` 分开：菜单栏是**单色 template 渲染**，颜色不生效，
     /// 状态只能靠形状传达；而 App 内部可以用颜色，两者的取舍不一样。
-    enum IconState {
+    ///
+    /// `CaseIterable` 是给测试用的：`switch` 已经保证每个状态都有符号名，但符号名写错、
+    /// 或者符号在部署目标上不存在，只在运行时表现成「菜单栏空了一块」。测试要遍历，
+    /// 而遍历手写数组的话，以后加的新状态会悄悄漏出覆盖范围。
+    enum IconState: CaseIterable {
         /// 一切正常
         case healthy
         /// 有待同步的改动
@@ -287,12 +385,12 @@ final class AppModel {
         case unavailable
     }
 
-    /// 一次性动效事件（同步成功/失败）。
+    /// 一次性结果反馈（同步成功/失败）。
     ///
-    /// 带自增 id 而不是「消费后清空」：菜单栏只需要记住上次播过的 id，
+    /// 带自增 id 而不是「消费后清空」：菜单栏只需要记住上次显示过的 id，
     /// 不用回头改 model 的状态，读写方向保持单一。
     struct IconPulse: Equatable {
-        enum Kind { case success, failure }
+        enum Kind: CaseIterable { case success, failure }
         let id: Int
         let kind: Kind
     }
@@ -435,6 +533,8 @@ final class AppModel {
                     "释放 \(Format.bytes(result.freedBytes)) · 保留 \(result.kept) 份"
                 )
             }
+        case .installUpdate:
+            await installUpdate()
         }
     }
 

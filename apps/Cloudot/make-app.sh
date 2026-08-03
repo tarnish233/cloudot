@@ -12,7 +12,10 @@ REPO="$(cd "$HERE/../.." && pwd)"
 APP="$HERE/build/Cloudot.app"
 
 BUNDLE_ID="com.tarnish233.cloudot"
-VERSION="0.2.0"
+# 版本号从 workspace 的 Cargo.toml 读，不在这里另写一份 ——
+# 「关于」页会把 App 和 CLI 的版本并排显示，两边分叉了用户一眼就能看见。
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/Cargo.toml" | head -1)"
+[ -n "$VERSION" ] || { echo "从 $REPO/Cargo.toml 读不出版本号"; exit 1; }
 
 echo "==> 构建 GUI（${CONFIG}）"
 swift build --package-path "$HERE" -c "$CONFIG"
@@ -103,3 +106,43 @@ fi
 echo
 echo "完成：$APP"
 echo "运行：open '$APP'"
+
+# DMG 只在显式要求时打 —— 它要挂载/卸载磁盘映像，比单纯组装 bundle 慢得多，
+# 日常改代码不需要。
+if [ "${MAKE_DMG:-}" != "1" ]; then
+  echo
+  echo "打 DMG：MAKE_DMG=1 $0"
+  exit 0
+fi
+
+DMG="$HERE/build/Cloudot-${VERSION}.dmg"
+echo
+echo "==> 打包 $DMG"
+
+STAGE="$(mktemp -d)/Cloudot"
+mkdir -p "$STAGE"
+cp -R "$APP" "$STAGE/"
+# 拖拽安装：左边 .app，右边 Applications 的快捷方式
+ln -s /Applications "$STAGE/Applications"
+
+rm -f "$DMG"
+# UDZO = zlib 压缩；-quiet 之外还要吞掉 hdiutil 的进度噪音
+hdiutil create -volname "cloudot ${VERSION}" \
+  -srcfolder "$STAGE" -ov -format UDZO -quiet "$DMG"
+rm -rf "$(dirname "$STAGE")"
+
+DMG_SIZE="$(stat -f%z "$DMG")"
+# 校验和单独出一个 .sha256 文件：homebrew-tap 的更新流程是从 release 资产里读它，
+# 而不是自己下载整个 DMG 再算（见 tap 仓库里 gitpic 的那套 workflow）。
+shasum -a 256 "$DMG" | awk '{print $1 "  " "'"$(basename "$DMG")"'"}' > "$DMG.sha256"
+DMG_SHA="$(awk '{print $1}' "$DMG.sha256")"
+echo "==> DMG 就绪：$(( DMG_SIZE / 1024 / 1024 )) MB"
+echo "    sha256: $DMG_SHA"
+echo
+echo "发布用："
+echo "  gh release create v${VERSION} \\"
+echo "    '$DMG' '$DMG.sha256' \\"
+echo "    --title 'Cloudot v${VERSION}' --generate-notes"
+echo
+echo "  tap 那边会在 6 小时内自动更新 Cask（也可以去 Actions 手动触发）。"
+

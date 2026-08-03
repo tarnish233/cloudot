@@ -31,6 +31,8 @@ struct MainWindow: View {
                     DoctorPane(model: model)
                 case .backups:
                     BackupsPane(model: model)
+                case .about:
+                    AboutPane(model: model)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

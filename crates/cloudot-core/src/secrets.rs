@@ -222,7 +222,9 @@ fn suspicious_assignment(line: &str) -> Option<String> {
     if key.is_empty() || key.len() > 64 {
         return None;
     }
-    let matched = SUSPICIOUS_KEYS.iter().find(|needle| key.contains(*needle))?;
+    let matched = SUSPICIOUS_KEYS
+        .iter()
+        .find(|needle| key.contains(*needle))?;
 
     let value = raw_value[1..].trim().trim_matches(['"', '\'', ',']).trim();
     if is_placeholder(value) || value.len() < 16 {
@@ -232,7 +234,10 @@ fn suspicious_assignment(line: &str) -> Option<String> {
         return None; // 有空格之类，更像散文而不是凭据
     }
     // 只报键名，绝不带上值
-    Some(format!("键名含 “{matched}”，值长度 {} 且形似凭据", value.len()))
+    Some(format!(
+        "键名含 “{matched}”，值长度 {} 且形似凭据",
+        value.len()
+    ))
 }
 
 #[cfg(test)]

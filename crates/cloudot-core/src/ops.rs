@@ -195,13 +195,11 @@ pub fn add(layout: &Layout, app_id: &str, force: bool, allow_secrets: bool) -> R
 
     for path in &ad.paths {
         let target = layout.expand(&path.path);
-        let step = layout
-            .store_rel_for(&target)
-            .and_then(|store_rel| {
-                let store_abs = layout.store_path(&store_rel);
-                link::adopt_file(layout, &target, &store_abs, &stamp, force)
-                    .map(|report| (store_rel, store_abs, report))
-            });
+        let step = layout.store_rel_for(&target).and_then(|store_rel| {
+            let store_abs = layout.store_path(&store_rel);
+            link::adopt_file(layout, &target, &store_abs, &stamp, force)
+                .map(|report| (store_rel, store_abs, report))
+        });
 
         match step {
             Ok((store_rel, store_abs, report)) => {
@@ -478,9 +476,7 @@ fn heal_orphans(
                 } else {
                     (
                         HealSource::Failed,
-                        Some(
-                            "git 历史和备份里都找不到内容，软链保持原样以免丢掉线索".to_owned(),
-                        ),
+                        Some("git 历史和备份里都找不到内容，软链保持原样以免丢掉线索".to_owned()),
                     )
                 }
             }
@@ -505,8 +501,7 @@ fn write_real_file(target: &Path, bytes: &[u8]) -> Result<()> {
     if let Ok(md) = fs::symlink_metadata(target)
         && md.file_type().is_symlink()
     {
-        fs::remove_file(target)
-            .with_context(|| format!("移除软链 {} 失败", target.display()))?;
+        fs::remove_file(target).with_context(|| format!("移除软链 {} 失败", target.display()))?;
     }
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;

@@ -30,7 +30,10 @@ pub struct LinkRecord {
 impl LinkRecord {
     /// target 现在是否还是指向本记录 store 路径的软链。
     pub fn still_ours(&self, layout: &Layout) -> bool {
-        points_at(&layout.expand(&self.target), &layout.store_path(&self.store))
+        points_at(
+            &layout.expand(&self.target),
+            &layout.store_path(&self.store),
+        )
     }
 }
 
@@ -47,9 +50,7 @@ impl LinkRecords {
     pub fn load(layout: &Layout) -> Result<Self> {
         let path = layout.links_file();
         match fs::read_to_string(&path) {
-            Ok(raw) => {
-                toml::from_str(&raw).with_context(|| format!("{} 解析失败", path.display()))
-            }
+            Ok(raw) => toml::from_str(&raw).with_context(|| format!("{} 解析失败", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e).with_context(|| format!("读取 {} 失败", path.display())),
         }

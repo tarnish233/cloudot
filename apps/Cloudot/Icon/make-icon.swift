@@ -1,25 +1,25 @@
 // cloudot 应用图标 —— 原创设计，不派生自任何第三方素材。
 //
-// 意象：cloudot 的本质是「软链」—— 家目录里的配置指向一个共享的 store，
-// 多台机器读同一份内容。所以画两个节点由一条链路相连，而不是画一台备份机。
+// 意象直接取 cloudot 在做的事：**同步**。glyph 用的就是菜单栏那个
+// `arrow.triangle.2.circlepath`，同一个 SF Symbol —— 不是「风格相似」，
+// 是同一份矢量数据，所以 App 图标和菜单栏图标永远不会走形。
 //
-// 构图：
-//   · 圆角方底（macOS 的超椭圆，n=5），系统蓝到青的对角渐变
-//   · 中央一条环形链路，两端各一个节点 —— 一台机器、一份共享配置
-//   · 链路留一个缺口并用箭头收尾，表示单向落地（store → 本机）
+// 底面是渐变 squircle，材质靠六层叠出来：外投影、多段底色渐变、球面高光、
+// 底部冷色反射、内侧倒角、符号自身的投影与柔光。全部 CoreGraphics 绘制，
+// 没有外部素材，授权干净。
 //
-// 全部用 CoreGraphics 画，没有外部素材，因此授权干净。
-//
-// 用法：swift make-icon.swift   → 输出 AppIcon.png（1024×1024）
+// 用法：swift make-icon.swift [输出路径]   → AppIcon.png（1024×1024）
 import AppKit
 import Foundation
+
+// MARK: - 基础工具
 
 /// macOS 的图标圆角是超椭圆而不是圆弧，小尺寸下看得出差别。
 func squircle(in rect: CGRect, n: CGFloat = 5) -> CGPath {
     let path = CGMutablePath()
     let a = rect.width / 2, b = rect.height / 2
     let cx = rect.midX, cy = rect.midY
-    let steps = 720
+    let steps = 1440
     for i in 0...steps {
         let t = CGFloat(i) / CGFloat(steps) * 2 * .pi
         let ct = cos(t), st = sin(t)
@@ -41,123 +41,218 @@ func rgb(_ hex: UInt32, _ alpha: CGFloat = 1) -> CGColor {
     )
 }
 
-func render(size S: CGFloat) -> NSImage {
-    let image = NSImage(size: NSSize(width: S, height: S))
-    image.lockFocus()
-    defer { image.unlockFocus() }
-    guard let ctx = NSGraphicsContext.current?.cgContext else { return image }
-
-    ctx.setShouldAntialias(true)
-    ctx.interpolationQuality = .high
-
-    // macOS 图标不占满画布，四周留白约 10%
-    let inset = S * 0.098
-    let body = CGRect(x: inset, y: inset, width: S - inset * 2, height: S - inset * 2)
-    let shape = squircle(in: body)
-
-    // 底：系统蓝 → 青的对角渐变
-    ctx.saveGState()
-    ctx.addPath(shape)
-    ctx.clip()
-    let bg = CGGradient(
-        colorsSpace: CGColorSpaceCreateDeviceRGB(),
-        colors: [rgb(0x2E9BF5), rgb(0x0B62D6)] as CFArray,
-        locations: [0, 1]
+func bitmap(_ width: Int, _ height: Int) -> NSBitmapImageRep {
+    NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
     )!
-    ctx.drawLinearGradient(
-        bg,
-        start: CGPoint(x: body.minX, y: body.maxY),
-        end: CGPoint(x: body.maxX, y: body.minY),
-        options: []
-    )
+}
 
-    // 顶部一层柔光，让平面渐变有点体积感
-    let sheen = CGGradient(
-        colorsSpace: CGColorSpaceCreateDeviceRGB(),
-        colors: [rgb(0xFFFFFF, 0.26), rgb(0xFFFFFF, 0)] as CFArray,
-        locations: [0, 1]
-    )!
-    ctx.drawRadialGradient(
-        sheen,
-        startCenter: CGPoint(x: body.midX, y: body.maxY - body.height * 0.06),
-        startRadius: 0,
-        endCenter: CGPoint(x: body.midX, y: body.maxY - body.height * 0.06),
-        endRadius: body.width * 0.72,
-        options: []
-    )
-    ctx.restoreGState()
+func draw(into rep: NSBitmapImageRep, _ body: (CGContext) -> Void) {
+    let context = NSGraphicsContext(bitmapImageRep: rep)!
+    NSGraphicsContext.saveGraphicsState()
+    defer { NSGraphicsContext.restoreGraphicsState() }
+    NSGraphicsContext.current = context
+    context.cgContext.setShouldAntialias(true)
+    context.cgContext.interpolationQuality = .high
+    body(context.cgContext)
+}
 
-    // 内描边，贴合系统图标的边缘处理
-    ctx.saveGState()
-    ctx.addPath(shape)
-    ctx.setStrokeColor(rgb(0xFFFFFF, 0.22))
-    ctx.setLineWidth(S * 0.008)
-    ctx.strokePath()
-    ctx.restoreGState()
+// MARK: - glyph
 
-    // MARK: 链路
-    //
-    // 一条留缺口的圆环，两端各一个节点，缺口处用箭头收尾表示方向（store → 本机）。
-    // 节点必须落在环的两个**端点**上，否则会盖住环线或箭头。
-    let cx = body.midX, cy = body.midY
-    let ringR = body.width * 0.255
-    let lw = S * 0.058
-    let nodeR = S * 0.058
-
-    // 环：从 40° 逆时针画到 300°（缺口在右下方约 -20°…40°）
-    let startDeg: CGFloat = 40, endDeg: CGFloat = 300
-    let startRad = startDeg * .pi / 180, endRad = endDeg * .pi / 180
-
-    ctx.saveGState()
-    ctx.setLineCap(.round)
-    ctx.setLineWidth(lw)
-    ctx.setStrokeColor(rgb(0xFFFFFF, 0.95))
-    ctx.addArc(
-        center: CGPoint(x: cx, y: cy),
-        radius: ringR,
-        startAngle: startRad,
-        endAngle: endRad,
-        clockwise: false
-    )
-    ctx.strokePath()
-    ctx.restoreGState()
-
-    // 箭头：画在环的终点（300°）处，沿逆时针切线指出去
-    let tip = CGPoint(x: cx + cos(endRad) * ringR, y: cy + sin(endRad) * ringR)
-    let head = S * 0.062
-    ctx.saveGState()
-    ctx.translateBy(x: tip.x, y: tip.y)
-    // 逆时针行进方向的切线 = 角度 + 90°
-    ctx.rotate(by: endRad + .pi / 2)
-    ctx.beginPath()
-    ctx.move(to: CGPoint(x: 0, y: head * 0.95))
-    ctx.addLine(to: CGPoint(x: -head * 0.9, y: -head * 0.6))
-    ctx.addLine(to: CGPoint(x: head * 0.9, y: -head * 0.6))
-    ctx.closePath()
-    ctx.setFillColor(rgb(0xFFFFFF, 0.95))
-    ctx.fillPath()
-    ctx.restoreGState()
-
-    // 两个节点：实心 = 本机，空心 = 共享的 store。
-    // 放在环的中段（120° 与 220°），不与端点/箭头打架。
-    for (deg, filled) in [(CGFloat(122), true), (CGFloat(218), false)] {
-        let rad = deg * .pi / 180
-        let p = CGPoint(x: cx + cos(rad) * ringR, y: cy + sin(rad) * ringR)
-        let box = CGRect(x: p.x - nodeR, y: p.y - nodeR, width: nodeR * 2, height: nodeR * 2)
-        // 先用背景色垫一圈，把环线挖断，节点才不像串在线上的珠子
-        ctx.setFillColor(rgb(0x1F7AE0))
-        ctx.fillEllipse(in: box.insetBy(dx: -lw * 0.42, dy: -lw * 0.42))
-        if filled {
-            ctx.setFillColor(rgb(0xFFFFFF))
-            ctx.fillEllipse(in: box)
-        } else {
-            ctx.setStrokeColor(rgb(0xFFFFFF))
-            ctx.setLineWidth(S * 0.028)
-            ctx.strokeEllipse(in: box.insetBy(dx: S * 0.014, dy: S * 0.014))
-        }
+/// SF Symbol 渲染成纯白蒙版，后面所有对符号的处理（投影、柔光、渐变填充）
+/// 都拿这张蒙版当形状用。
+func glyphMask(_ name: String, side: CGFloat, weight: NSFont.Weight) -> (CGImage, NSSize) {
+    let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)!
+        .withSymbolConfiguration(.init(pointSize: side, weight: weight))!
+    let size = symbol.size
+    let rep = bitmap(Int(size.width.rounded()), Int(size.height.rounded()))
+    draw(into: rep) { _ in
+        let rect = NSRect(origin: .zero, size: size)
+        symbol.draw(in: rect)
+        NSColor.white.set()
+        rect.fill(using: .sourceAtop)
     }
+    return (rep.cgImage!, size)
+}
 
-    return image
+/// 给蒙版填上垂直渐变，做出「有厚度的白色材质」而不是一片死白。
+func shadeGlyph(_ mask: CGImage, _ size: NSSize, top: CGColor, bottom: CGColor) -> CGImage {
+    let rep = bitmap(Int(size.width.rounded()), Int(size.height.rounded()))
+    draw(into: rep) { ctx in
+        let gradient = CGGradient(
+            colorsSpace: CGColorSpaceCreateDeviceRGB(),
+            colors: [top, bottom] as CFArray,
+            locations: [0, 1]
+        )!
+        ctx.drawLinearGradient(
+            gradient,
+            start: CGPoint(x: 0, y: size.height),
+            end: CGPoint(x: 0, y: 0),
+            options: []
+        )
+        ctx.setBlendMode(.destinationIn)
+        ctx.draw(mask, in: CGRect(origin: .zero, size: size))
+    }
+    return rep.cgImage!
+}
+
+// MARK: - 渲染
+
+func render(size S: CGFloat) -> NSBitmapImageRep {
+    let rep = bitmap(Int(S), Int(S))
+    draw(into: rep) { ctx in
+        // macOS 图标不占满画布，四周留白约 10%
+        let inset = S * 0.098
+        let body = CGRect(x: inset, y: inset, width: S - inset * 2, height: S - inset * 2)
+        let shape = squircle(in: body)
+
+        // ── 1. 外投影，让图标从背景上浮起来。
+        //
+        // 投影和底色必须**分两层**画：同一层里填色 + 投影时，抗锯齿边缘会漏出填充色，
+        // 看着像描歪了一圈边框。这里先单独把投影打到画布上，底色渐变随后整片盖住同一个
+        // 形状，边缘就只剩渐变自己的颜色。
+        // 投影色还必须是**中性黑** —— 试过用深蓝，会在图标外沿留一圈肉眼可见的蓝晕，
+        // 效果跟描边一样糟。
+        ctx.saveGState()
+        ctx.setShadow(
+            offset: CGSize(width: 0, height: -S * 0.008),
+            blur: S * 0.022,
+            color: rgb(0x000000, 0.20)
+        )
+        ctx.addPath(shape)
+        ctx.setFillColor(rgb(0x000000))
+        ctx.fillPath()
+        ctx.restoreGState()
+
+        ctx.saveGState()
+        ctx.addPath(shape)
+        ctx.clip()
+
+        let space = CGColorSpaceCreateDeviceRGB()
+
+        // ── 2. 底色：三段渐变。中间提亮一档，两点线性渐变会显得很平。
+        let background = CGGradient(
+            colorsSpace: space,
+            colors: [rgb(0x5CC3FA), rgb(0x2A93F0), rgb(0x0B57C9)] as CFArray,
+            locations: [0, 0.48, 1]
+        )!
+        ctx.drawLinearGradient(
+            background,
+            start: CGPoint(x: body.minX, y: body.maxY),
+            end: CGPoint(x: body.maxX, y: body.minY),
+            options: []
+        )
+
+        // ── 3. 球面高光：径向，光源在左上偏上
+        let sheen = CGGradient(
+            colorsSpace: space,
+            colors: [rgb(0xFFFFFF, 0.30), rgb(0xFFFFFF, 0.05), rgb(0xFFFFFF, 0)] as CFArray,
+            locations: [0, 0.45, 1]
+        )!
+        let sheenCenter = CGPoint(x: body.midX - body.width * 0.14, y: body.maxY - body.height * 0.10)
+        ctx.drawRadialGradient(
+            sheen,
+            startCenter: sheenCenter, startRadius: 0,
+            endCenter: sheenCenter, endRadius: body.width * 0.78,
+            options: []
+        )
+
+        // ── 4. 底部反射光：冷色回弹，玻璃质感主要靠这一层
+        let bounce = CGGradient(
+            colorsSpace: space,
+            colors: [rgb(0x7FE9FF, 0), rgb(0x7FE9FF, 0.22)] as CFArray,
+            locations: [0, 1]
+        )!
+        ctx.drawLinearGradient(
+            bounce,
+            start: CGPoint(x: body.midX, y: body.minY + body.height * 0.42),
+            end: CGPoint(x: body.midX, y: body.minY),
+            options: []
+        )
+
+        // ── 5. 内侧倒角：顶缘提亮 + 底缘压暗，做出边框厚度。
+        // 手法是拿「画布挖掉 shape」的反向路径投影到内侧。
+        ctx.saveGState()
+        let outer = CGMutablePath()
+        outer.addRect(body.insetBy(dx: -S, dy: -S))
+        outer.addPath(shape)
+        ctx.setShadow(
+            offset: CGSize(width: 0, height: -S * 0.010),
+            blur: S * 0.020,
+            color: rgb(0xFFFFFF, 0.55)
+        )
+        ctx.addPath(outer)
+        ctx.setFillColor(rgb(0x000000))
+        ctx.fillPath(using: .evenOdd)
+        ctx.setShadow(
+            offset: CGSize(width: 0, height: S * 0.012),
+            blur: S * 0.026,
+            color: rgb(0x063A78, 0.50)
+        )
+        ctx.addPath(outer)
+        ctx.setFillColor(rgb(0x000000))
+        ctx.fillPath(using: .evenOdd)
+        ctx.restoreGState()
+
+        ctx.restoreGState()
+
+        // ── 6. 外描边：收住边缘
+        ctx.saveGState()
+        ctx.addPath(shape)
+        ctx.setStrokeColor(rgb(0xFFFFFF, 0.14))
+        ctx.setLineWidth(S * 0.005)
+        ctx.strokePath()
+        ctx.restoreGState()
+
+        // ── 7. glyph —— 和菜单栏「同步中」用的是同一个 SF Symbol。
+        // 改这里之前先看 IconState+Symbol.swift，两边要一起改。
+        let (mask, glyphSize) = glyphMask(
+            "arrow.triangle.2.circlepath",
+            side: body.width * 0.54,
+            weight: .semibold
+        )
+        let glyphRect = CGRect(
+            x: body.midX - glyphSize.width / 2,
+            y: body.midY - glyphSize.height / 2,
+            width: glyphSize.width,
+            height: glyphSize.height
+        )
+
+        // 符号自己的投影，让它浮在底面之上
+        ctx.saveGState()
+        ctx.setShadow(
+            offset: CGSize(width: 0, height: -S * 0.008),
+            blur: S * 0.022,
+            color: rgb(0x04305F, 0.45)
+        )
+        ctx.draw(mask, in: glyphRect)
+        ctx.restoreGState()
+
+        // ── 8. 柔光：零偏移的阴影垫在符号后面，做出一圈很淡的晕。
+        //
+        // 两层而不是一层：紧的那层（blur 3%）负责「亮起来」，散的那层（blur 7%）负责
+        // 「晕开」。单层做不到 —— blur 小了贴着符号看不出来，blur 大了散成一片白雾把
+        // 底色洗掉。
+        //
+        // 混合模式用普通混合，**不要用 `.plusLighter`**：加法混合在蓝底上会把绿蓝通道
+        // 推到 255 饱和，出来是霓虹灯描边而不是光晕（实测紧贴符号处从 40,131,192 直接
+        // 跳到 194,255,255）。颜色用冷白，跟底色同色系，看着才像底面被照亮。
+        //
+        // alpha 刻意压得很低：这是气氛，不是第二个图形。一旦能单独看出光晕的边界就过了。
+        ctx.saveGState()
+        ctx.setShadow(offset: .zero, blur: S * 0.030, color: rgb(0xE8F6FF, 0.19))
+        ctx.draw(mask, in: glyphRect)
+        ctx.setShadow(offset: .zero, blur: S * 0.070, color: rgb(0xBFE4FF, 0.14))
+        ctx.draw(mask, in: glyphRect)
+        ctx.restoreGState()
+
+        // ── 9. 符号本体：上端纯白、下端微微带蓝
+        let shaded = shadeGlyph(mask, glyphSize, top: rgb(0xFFFFFF), bottom: rgb(0xE3F1FF))
+        ctx.draw(shaded, in: glyphRect)
+    }
+    return rep
 }
 
 // MARK: - 输出
@@ -166,11 +261,7 @@ let out = CommandLine.arguments.count > 1
     ? CommandLine.arguments[1]
     : FileManager.default.currentDirectoryPath + "/AppIcon.png"
 
-let icon = render(size: 1024)
-guard let tiff = icon.tiffRepresentation,
-      let rep = NSBitmapImageRep(data: tiff),
-      let png = rep.representation(using: .png, properties: [:])
-else {
+guard let png = render(size: 1024).representation(using: .png, properties: [:]) else {
     FileHandle.standardError.write(Data("渲染失败\n".utf8))
     exit(1)
 }

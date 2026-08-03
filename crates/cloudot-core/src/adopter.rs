@@ -10,7 +10,10 @@ const BUILTIN: &[(&str, &str)] = &[
     ("fish", include_str!("../../../adopters/fish.toml")),
     ("ghostty", include_str!("../../../adopters/ghostty.toml")),
     ("gitpic", include_str!("../../../adopters/gitpic.toml")),
-    ("karabiner", include_str!("../../../adopters/karabiner.toml")),
+    (
+        "karabiner",
+        include_str!("../../../adopters/karabiner.toml"),
+    ),
 ];
 
 /// 一个应用的适配定义：它的配置在哪、怎么落地、怎么检测装没装。
@@ -58,8 +61,8 @@ pub fn load_all(layout: &Layout) -> Result<Vec<Adopter>> {
             }
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("读取 {} 失败", path.display()))?;
-            let ad: Adopter = toml::from_str(&raw)
-                .with_context(|| format!("{} 解析失败", path.display()))?;
+            let ad: Adopter =
+                toml::from_str(&raw).with_context(|| format!("{} 解析失败", path.display()))?;
             match out.iter_mut().find(|existing| existing.id == ad.id) {
                 Some(slot) => *slot = ad,
                 None => out.push(ad),
@@ -103,7 +106,10 @@ mod tests {
                 toml::from_str(raw).unwrap_or_else(|e| panic!("内置 adopter {key} 解析失败：{e}"));
             assert_eq!(&ad.id, key, "{key} 的 id 字段和登记的 key 不一致");
             assert!(!ad.name.is_empty(), "{key} 没有 name");
-            assert!(!ad.detect.is_empty(), "{key} 没有 detect，界面会永远显示未安装");
+            assert!(
+                !ad.detect.is_empty(),
+                "{key} 没有 detect，界面会永远显示未安装"
+            );
             assert!(!ad.paths.is_empty(), "{key} 没有 paths，纳管了也什么都不做");
         }
     }
@@ -161,8 +167,7 @@ mod tests {
     /// 编译器不会有任何提示。
     #[test]
     fn every_adopter_file_is_registered() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../adopters");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../adopters");
         let mut on_disk: Vec<String> = fs::read_dir(&dir)
             .expect("读 adopters/ 目录")
             .flatten()
@@ -199,7 +204,10 @@ mod tests {
         .expect("写文件");
 
         let all = load_all(&layout).expect("加载");
-        let ghostty = all.iter().find(|a| a.id == "ghostty").expect("找到 ghostty");
+        let ghostty = all
+            .iter()
+            .find(|a| a.id == "ghostty")
+            .expect("找到 ghostty");
         assert_eq!(ghostty.name, "我的 Ghostty");
         // 覆盖不应该把别的内置定义弄丢
         assert!(all.iter().any(|a| a.id == "fish"));

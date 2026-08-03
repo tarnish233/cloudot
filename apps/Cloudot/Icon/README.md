@@ -15,13 +15,23 @@
 cd apps/Cloudot/Icon && swift make-icon.swift
 ```
 
-构图取的是 cloudot 自己的核心意象 —— **软链**：两个节点（本机 / 共享 store）由一条
-留缺口的环形链路相连，缺口处用箭头收尾表示单向落地。整体轮廓恰好像个「c」。
-32px 下验证过仍可辨认。
+glyph 用的是 SF Symbol `arrow.triangle.2.circlepath` —— **和菜单栏「同步中」是同一个符号**，
+不是「风格相似」而是同一份矢量数据。改任何一边之前先看
+[`IconState+Symbol.swift`](../Sources/Cloudot/IconState%2BSymbol.swift)，两边要一起改。
 
-早先的版本派生自 macosicons 上 @Luca K 的「Smart Backup」，那站没有明确许可，
-已在开源前替换掉。`design-icons.swift` 是那一版的渲染器，**它的构图同样取自那件作品，
-所以也不能用于分发** —— 留着仅作记录。
+底面是渐变 squircle，材质靠六层叠出来（外投影、三段底色渐变、球面高光、底部冷色反射、
+内侧倒角、符号自身的投影与柔光）。几条踩过的坑都写在脚本注释里了，动参数前先读：
+
+- 投影与底色**必须分两层画**，同层会在抗锯齿边缘漏出填充色，像描歪的边框。
+- 投影色必须是**中性黑**，用深蓝会在外沿留一圈可见的蓝晕。
+- 符号柔光**不能用 `.plusLighter`**，加法混合在蓝底上会把通道推到饱和，
+  出来是霓虹描边而不是光晕。
+
+16 / 32px 下都实测过。换图前务必缩到 16px 看一眼再定。
+
+早先有两版已经弃用：一版派生自 macosicons 上 @Luca K 的「Smart Backup」，
+`design-icons.swift` 是它的渲染器，**构图取自那件作品，不能用于分发**，留着仅作记录；
+另一版是「两个节点 + 缺口环」的软链意象，因为和菜单栏图标不同源而换掉了。
 
 ### 关于深浅色自适应
 
@@ -36,17 +46,24 @@ cd apps/Cloudot/Icon && swift make-icon.swift
   **Icon Composer** 产出 `.icon` 文件，而它**只有 GUI**：`iconutil` 只认 icns/iconset，
   `xcrun -f icontool` 找不到，actool 二进制里也搜不到 `.icon` 相关字串。
 
-真正每天看的是菜单栏机器人；它是单色 template 渲染，本来就跟随系统外观。
+真正每天看的是菜单栏图标；它是单色 template 渲染，本来就跟随系统外观。
 
 ## 脚本
 
-- `design-icons.swift` —— 原创图标渲染器（不依赖任何第三方素材），输出到 `/tmp/cloudot-icon/`。
-  留着是为了应对上面那条授权问题：需要换图时直接用。
-  glyph 仍使用 SF Symbol `arrow.triangle.2.circlepath`；菜单栏机器人是独立的 18pt 矢量设计，
-  外形是**超椭圆**而不是圆弧圆角（macOS 的图标形状是 squircle，小尺寸下看得出差别）。
+- `make-icon.swift` —— **当前在用的渲染器**，输出 `AppIcon.png`。见上面的「授权」。
+
+- `design-icons.swift` —— 更早一版的渲染器，输出到 `/tmp/cloudot-icon/`。
+  它的构图派生自第三方素材，**不能用于分发**，留着仅作记录。
+  外形都是**超椭圆**而不是圆弧圆角（macOS 的图标形状是 squircle，小尺寸下看得出差别）。
 
 - `search-macosicons.sh` —— 用 macosicons API 搜候选，key 从 `MACOSICONS_API_KEY` 环境变量读。
 
   ⚠️ 那个库里下载量最高的几乎全是现有品牌的同人重绘（iCloud、Adobe Creative Cloud、
   Apple Shortcuts、系统设置齿轮、GitHub、LinkedIn、希捷），不能拿来当自己应用的图标。
   剩下的多是**文件夹**造型，应用用文件夹图标会在 Finder 里被误认成文件夹。
+
+  该站现在还有一组 `/api/v1/editor/*` 端点，其中 `POST /editor/generate` 能用 AI
+  出图，`/editor/icns`、`/editor/iconset`、`/editor/pack` 能直接产出 macOS 图标格式。
+  评估过，**没有采用** —— 服务条款是「仅限非商业用途 + 必须署名 macOSicons.com」，
+  为了一张图标把这层约束装回来不划算，自绘完全够用。真要用的话注意配额很紧：
+  免费档 50 次/月，而生成一张图记 25 credits。

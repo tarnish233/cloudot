@@ -75,9 +75,8 @@ pub struct PruneOutcome {
 /// 只会删得更少、不会更多。
 pub fn prune(layout: &Layout, keep: usize, older_than_days: Option<u64>) -> Result<PruneOutcome> {
     let set = list(layout)?;
-    let cutoff = older_than_days.map(|days| {
-        chrono::Local::now() - chrono::Duration::days(days as i64)
-    });
+    let cutoff =
+        older_than_days.map(|days| chrono::Local::now() - chrono::Duration::days(days as i64));
 
     let mut removed = Vec::new();
     let mut freed_bytes = 0;
@@ -94,8 +93,7 @@ pub fn prune(layout: &Layout, keep: usize, older_than_days: Option<u64>) -> Resu
             }
         }
         let dir = layout.backups().join(&entry.stamp);
-        fs::remove_dir_all(&dir)
-            .with_context(|| format!("删除备份 {} 失败", dir.display()))?;
+        fs::remove_dir_all(&dir).with_context(|| format!("删除备份 {} 失败", dir.display()))?;
         freed_bytes += entry.bytes;
         removed.push(entry.clone());
     }

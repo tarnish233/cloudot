@@ -7,7 +7,7 @@ struct AppsPane: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: CloudotTheme.sectionSpacing) {
                 if let managedApps = model.status?.apps, !managedApps.isEmpty {
-                    sectionTitle("已同步", count: managedApps.count)
+                    SectionHeader(title: "已同步", symbol: "checkmark.circle", count: managedApps.count)
 
                     ForEach(managedApps) { app in
                         ManagedAppCard(app: app, model: model)
@@ -15,7 +15,7 @@ struct AppsPane: View {
                 }
 
                 if !model.detectedCandidates.isEmpty {
-                    sectionTitle("可同步", count: model.detectedCandidates.count)
+                    SectionHeader(title: "可同步", symbol: "app.dashed", count: model.detectedCandidates.count)
 
                     GroupBox {
                         VStack(spacing: 0) {
@@ -61,15 +61,5 @@ struct AppsPane: View {
             .padding(CloudotTheme.pagePadding)
         }
         .scrollContentBackground(.visible)
-    }
-
-    private func sectionTitle(_ title: String, count: Int) -> some View {
-        HStack {
-            Text(title)
-                .font(.headline)
-            Text(count, format: .number)
-                .foregroundStyle(.secondary)
-        }
-        .accessibilityElement(children: .combine)
     }
 }
