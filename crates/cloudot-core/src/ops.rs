@@ -803,7 +803,10 @@ pub struct UnadoptOutcome {
 
 /// 退出纳管：软链换回实体文件，从 store 和 manifest 里移除。
 ///
-/// 这是产品可信度的逃生门 —— 用户随时能把配置拿回来。
+/// 这是产品可信度的逃生门 —— 用户随时能把配置拿回来。所以它和 [`add`] 一样
+/// **要么整体成功、要么整体回滚**：多路径应用（fish 有 3 个）中途失败时，若不回滚
+/// 就会留下「一部分已解链、store 副本也删了，但 manifest 里这个应用还完整」的
+/// 半退管状态 —— `status` 以为还在纳管，实际那几个文件已经取不回来了。
 pub fn unadopt(layout: &Layout, app_id: &str, dry_run: bool) -> Result<UnadoptOutcome> {
     let _lock = Lock::acquire(layout)?;
     let config = Config::load(layout)?;
@@ -817,14 +820,55 @@ pub fn unadopt(layout: &Layout, app_id: &str, dry_run: bool) -> Result<UnadoptOu
     })?;
 
     let mut restored = Vec::new();
+    let mut done: Vec<(PathBuf, PathBuf, link::UnadoptReport)> = Vec::new();
+    let mut failure: Option<anyhow::Error> = None;
+
     for file in &app.files {
         let target = layout.expand(&file.target);
         let store = layout.store_path(&file.store);
-        if !dry_run {
-            link::unadopt_file(layout, &target, &store)?;
-            records.remove_target(&file.target);
+        if dry_run {
+            // 预演也要把「这个文件会失败」报出来，这正是它的用处
+            if let Err(e) = link::plan_unadopt(layout, &target, &store) {
+                failure = Some(e);
+                break;
+            }
+            restored.push(file.target.clone());
+            continue;
         }
-        restored.push(file.target.clone());
+        match link::unadopt_file(layout, &target, &store) {
+            Ok(report) => {
+                records.remove_target(&file.target);
+                restored.push(file.target.clone());
+                done.push((target, store, report));
+            }
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        }
+    }
+
+    if let Some(err) = failure {
+        if dry_run {
+            return Err(err.context(format!("预演：退出纳管 {} 会失败", app.name)));
+        }
+        // 逆序撤销已经做过的那些，把软链和 store 副本都还原回去
+        let mut unwind_errors = Vec::new();
+        for (target, store, report) in done.iter().rev() {
+            if let Err(e) = link::revert_unadopt(target, store, report) {
+                unwind_errors.push(format!("  {} —— {e:#}", layout.contract(target)));
+            }
+        }
+        return Err(if unwind_errors.is_empty() {
+            err.context(format!("退出纳管 {} 失败，已回滚本次全部改动", app.name))
+        } else {
+            err.context(format!(
+                "退出纳管 {} 失败，而且回滚不完整，需要手工检查：\n{}\n\
+                 store 里被删掉的内容在 ~/.cloudot/backups 里还有一份。",
+                app.name,
+                unwind_errors.join("\n")
+            ))
+        });
     }
 
     if dry_run {
@@ -951,4 +995,463 @@ pub fn show(layout: &Layout, app_id: &str) -> Result<ShowOutcome> {
         detect: ad.detect,
         paths,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::TempHome;
+
+    /// 造一个已 init 的假家目录，并放一个自定义 adopter。
+    ///
+    /// `paths` 是 adopter 要纳管的家目录相对路径；顺序即 `add`/`unadopt` 的处理顺序，
+    /// 事务性测试靠它安排「第一个成功、第二个失败」。
+    fn init_home(tag: &str, paths: &[&str]) -> (TempHome, Layout) {
+        let home = TempHome::new(tag);
+        let layout = home.layout();
+        init(&layout, None, Some("test-device")).expect("init");
+
+        let entries = paths
+            .iter()
+            .map(|p| format!("[[paths]]\npath = \"~/{p}\"\n"))
+            .collect::<String>();
+        let first = paths.first().expect("至少一个路径");
+        fs::write(
+            layout.adopters_dir().join("t.toml"),
+            format!("id = \"t\"\nname = \"T\"\ndetect = [\"~/{first}\"]\n{entries}",),
+        )
+        .expect("写 adopter");
+        (home, layout)
+    }
+
+    /// 在假家目录里写一个文件（自动建父目录）。
+    fn write_home_file(layout: &Layout, rel: &str, body: &str) {
+        let path = layout.expand(&format!("~/{rel}"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, body).unwrap();
+    }
+
+    fn is_symlink(path: &Path) -> bool {
+        fs::symlink_metadata(path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+    }
+
+    // ── add 的事务性 ─────────────────────────────────────────────
+
+    #[test]
+    fn add_moves_file_into_store_and_links_it() {
+        let (_h, layout) = init_home("ops-add", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "body\n");
+
+        let out = add(&layout, "t", false, false, false).expect("add");
+        assert_eq!(out.files.len(), 1);
+        assert_eq!(out.files[0].action, AdoptAction::MovedIntoStore);
+        assert!(!out.dry_run);
+
+        let target = layout.expand("~/.config/t/conf");
+        assert!(is_symlink(&target), "target 该变成软链");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "body\n");
+        assert!(Manifest::load(&layout).unwrap().app("t").is_some());
+    }
+
+    /// 第二个路径是目录（当前版本不支持），整体必须回滚。
+    ///
+    /// 曾经的行为会留下「第一个已建链但 manifest 没记」的半纳管状态：
+    /// `status` 看不见它，`unadopt` 也撤不掉。
+    #[test]
+    fn add_rolls_back_everything_when_a_later_path_fails() {
+        let (_h, layout) = init_home("ops-add-rollback", &[".config/t/one", ".config/t/two"]);
+        write_home_file(&layout, ".config/t/one", "first\n");
+        // 目录 → adopt_file 报 Unsupported
+        fs::create_dir_all(layout.expand("~/.config/t/two")).unwrap();
+
+        let err = add(&layout, "t", false, false, false).expect_err("该整体失败");
+        assert!(format!("{err:#}").contains("已回滚"), "错误里该说明回滚了");
+
+        let one = layout.expand("~/.config/t/one");
+        assert!(!is_symlink(&one), "第一个路径该回滚成实体文件");
+        assert_eq!(fs::read_to_string(&one).unwrap(), "first\n", "内容要完整");
+        assert!(
+            !layout.store_path("files/.config/t/one").exists(),
+            "store 里不该有残留"
+        );
+        assert!(
+            Manifest::load(&layout).unwrap().app("t").is_none(),
+            "manifest 不该被写脏"
+        );
+        assert!(
+            LinkRecords::load(&layout).unwrap().links.is_empty(),
+            "links.toml 不该被写脏"
+        );
+    }
+
+    /// 凭据门禁在动手之前就该拦下，而且是整体拒绝。
+    #[test]
+    fn add_refuses_before_touching_anything_when_secrets_are_found() {
+        let (_h, layout) = init_home("ops-add-secrets", &[".config/t/conf", ".ssh/id_rsa"]);
+        write_home_file(&layout, ".config/t/conf", "harmless\n");
+        write_home_file(&layout, ".ssh/id_rsa", "x\n");
+
+        let err = add(&layout, "t", false, false, false).expect_err("该被拦下");
+        assert_eq!(
+            crate::errors::kind_of(&err),
+            crate::ErrorKind::SecretsDetected
+        );
+        // 即使第一个路径无害，也不该已经被移走
+        assert!(!is_symlink(&layout.expand("~/.config/t/conf")));
+        assert!(!layout.store_path("files/.config/t/conf").exists());
+    }
+
+    // ── unadopt 的事务性（回归：逃生门不能半开）─────────────────
+    //
+    // 曾经的行为：多路径应用中途失败时，前面的文件已经解链、store 副本也删了，
+    // 但 manifest 还没保存 —— `status` 以为还在纳管，实际那几个文件已经取不回来。
+
+    #[test]
+    fn unadopt_restores_all_files_and_clears_manifest() {
+        let (_h, layout) = init_home("ops-unadopt", &[".config/t/one", ".config/t/two"]);
+        write_home_file(&layout, ".config/t/one", "one\n");
+        write_home_file(&layout, ".config/t/two", "two\n");
+        add(&layout, "t", false, false, false).expect("add");
+
+        let out = unadopt(&layout, "t", false).expect("unadopt");
+        assert_eq!(out.restored.len(), 2);
+
+        for (rel, body) in [(".config/t/one", "one\n"), (".config/t/two", "two\n")] {
+            let target = layout.expand(&format!("~/{rel}"));
+            assert!(!is_symlink(&target), "{rel} 该还原成实体文件");
+            assert_eq!(fs::read_to_string(&target).unwrap(), body);
+        }
+        assert!(Manifest::load(&layout).unwrap().app("t").is_none());
+    }
+
+    #[test]
+    fn unadopt_rolls_back_when_a_later_file_fails() {
+        let (_h, layout) = init_home("ops-unadopt-rollback", &[".config/t/one", ".config/t/two"]);
+        write_home_file(&layout, ".config/t/one", "one\n");
+        write_home_file(&layout, ".config/t/two", "two\n");
+        add(&layout, "t", false, false, false).expect("add");
+
+        // 让第二个文件的 store 内容消失 → 软链悬空，unadopt_file 会拒绝处理它
+        fs::remove_file(layout.store_path("files/.config/t/two")).unwrap();
+
+        let err = unadopt(&layout, "t", false).expect_err("该整体失败");
+        assert!(
+            format!("{err:#}").contains("已回滚"),
+            "错误里该说明回滚了：{err:#}"
+        );
+
+        // 第一个文件必须回到纳管状态：软链在、store 副本也在
+        let one = layout.expand("~/.config/t/one");
+        assert!(is_symlink(&one), "第一个文件该重新变回软链");
+        assert_eq!(
+            fs::read_to_string(&one).unwrap(),
+            "one\n",
+            "透过软链读到的内容不能变"
+        );
+        assert!(
+            layout.store_path("files/.config/t/one").exists(),
+            "store 副本该被还原回来"
+        );
+        assert!(
+            Manifest::load(&layout).unwrap().app("t").is_some(),
+            "整体失败时 manifest 该保持原样，不能变成半退管"
+        );
+    }
+
+    #[test]
+    fn unadopt_reports_unknown_app_as_not_adopted() {
+        let (_h, layout) = init_home("ops-unadopt-unknown", &[".config/t/conf"]);
+        let err = unadopt(&layout, "nope", false).expect_err("该失败");
+        assert_eq!(crate::errors::kind_of(&err), crate::ErrorKind::NotAdopted);
+    }
+
+    // ── apply ───────────────────────────────────────────────────
+
+    #[test]
+    fn apply_relinks_a_missing_target() {
+        let (_h, layout) = init_home("ops-apply", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "body\n");
+        add(&layout, "t", false, false, false).expect("add");
+
+        let target = layout.expand("~/.config/t/conf");
+        fs::remove_file(&target).unwrap();
+
+        let out = apply(&layout, false, false).expect("apply");
+        assert_eq!(out.items.len(), 1);
+        assert_eq!(out.items[0].before, LinkState::Missing);
+        assert_eq!(out.items[0].action, ApplyAction::Linked);
+        assert!(is_symlink(&target));
+    }
+
+    /// 本地是实体文件时默认拒绝覆盖 —— 那份内容可能比 store 新。
+    ///
+    /// 注意两次 `apply` 之间要让锁先释放（`Lock` 的守卫在 drop 时才放锁，
+    /// 而 flock 按「打开的文件描述」生效，同进程二次 acquire 也会冲突）。
+    #[test]
+    fn apply_skips_a_real_local_file_without_force() {
+        let (_h, layout) = init_home("ops-apply-skip", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "in-store\n");
+        add(&layout, "t", false, false, false).expect("add");
+
+        // 模拟 App 用「替换写入」顶掉软链
+        let target = layout.expand("~/.config/t/conf");
+        fs::remove_file(&target).unwrap();
+        fs::write(&target, "newer-local\n").unwrap();
+
+        {
+            let out = apply(&layout, false, false).expect("apply");
+            assert_eq!(out.items[0].before, LinkState::ReplacedByFile);
+            assert_eq!(out.items[0].action, ApplyAction::Skipped);
+            assert!(out.items[0].note.is_some(), "跳过要说明原因");
+            assert_eq!(
+                fs::read_to_string(&target).unwrap(),
+                "newer-local\n",
+                "绝不能静默覆盖本地内容"
+            );
+        }
+
+        // --force 才覆盖，且一定先备份
+        let forced = apply(&layout, true, false).expect("apply --force");
+        assert_eq!(forced.items[0].action, ApplyAction::Replaced);
+        assert!(is_symlink(&target));
+        let backup = forced.items[0].backup.as_ref().expect("该留备份");
+        assert_eq!(fs::read_to_string(backup).unwrap(), "newer-local\n");
+    }
+
+    /// 孤儿软链（manifest 里已没有、却还指向 store）要自愈成实体文件。
+    #[test]
+    fn apply_heals_an_orphan_from_git_history() {
+        let (_h, layout) = init_home("ops-apply-heal", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "body\n");
+        add(&layout, "t", false, false, false).expect("add");
+
+        // 模拟别的机器 unadopt 后同步过来：manifest 清空、store 文件删掉，软链留着
+        let mut manifest = Manifest::load(&layout).unwrap();
+        manifest.remove("t");
+        manifest.save(&layout).unwrap();
+        fs::remove_file(layout.store_path("files/.config/t/conf")).unwrap();
+        Git::new(layout.store()).commit_all("wipe").unwrap();
+
+        let out = apply(&layout, false, false).expect("apply");
+        assert_eq!(out.healed.len(), 1, "该报出一条自愈");
+        assert_eq!(out.healed[0].source, HealSource::GitHistory);
+
+        let target = layout.expand("~/.config/t/conf");
+        assert!(!is_symlink(&target), "该还原成实体文件，不是悬空软链");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "body\n");
+    }
+
+    // ── dry-run：与真跑结论一致，且一个字节都不写 ────────────────
+
+    #[test]
+    fn dry_run_add_predicts_the_same_action_without_writing() {
+        let (_h, layout) = init_home("ops-dry-add", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "body\n");
+        let manifest_before = fs::read_to_string(layout.manifest_file()).unwrap();
+
+        let planned_actions = {
+            let planned = add(&layout, "t", false, false, true).expect("dry-run add");
+            assert!(planned.dry_run);
+            assert!(planned.commit.is_none(), "预演不该提交");
+
+            let target = layout.expand("~/.config/t/conf");
+            assert!(!is_symlink(&target), "预演建了软链");
+            assert!(!layout.store_path("files/.config/t/conf").exists());
+            assert_eq!(
+                fs::read_to_string(layout.manifest_file()).unwrap(),
+                manifest_before,
+                "预演动了 manifest"
+            );
+            planned.files.iter().map(|f| f.action).collect::<Vec<_>>()
+        };
+
+        // 真跑一遍，结论必须一致
+        let real = add(&layout, "t", false, false, false).expect("add");
+        assert_eq!(
+            planned_actions,
+            real.files.iter().map(|f| f.action).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn dry_run_unadopt_keeps_the_link_and_the_manifest() {
+        let (_h, layout) = init_home("ops-dry-unadopt", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "body\n");
+        add(&layout, "t", false, false, false).expect("add");
+
+        let out = unadopt(&layout, "t", true).expect("dry-run unadopt");
+        assert!(out.dry_run);
+        assert_eq!(out.restored.len(), 1, "该报出会还原哪些文件");
+
+        assert!(is_symlink(&layout.expand("~/.config/t/conf")), "预演解链了");
+        assert!(layout.store_path("files/.config/t/conf").exists());
+        assert!(
+            Manifest::load(&layout).unwrap().app("t").is_some(),
+            "预演从 manifest 里删掉了条目"
+        );
+    }
+
+    /// 预演也要把「会失败」报出来 —— 这正是它最该做的事。
+    #[test]
+    fn dry_run_unadopt_surfaces_a_failure_that_the_real_run_would_hit() {
+        let (_h, layout) = init_home("ops-dry-un-fail", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "body\n");
+        add(&layout, "t", false, false, false).expect("add");
+        // store 内容消失 → 软链悬空
+        fs::remove_file(layout.store_path("files/.config/t/conf")).unwrap();
+
+        let err = unadopt(&layout, "t", true).expect_err("预演该报失败");
+        assert!(
+            format!("{err:#}").contains("预演"),
+            "要说清这是预演的结论：{err:#}"
+        );
+        // 预演失败也不能动东西
+        assert!(is_symlink(&layout.expand("~/.config/t/conf")));
+    }
+
+    #[test]
+    fn dry_run_apply_predicts_relinking_without_doing_it() {
+        let (_h, layout) = init_home("ops-dry-apply", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "body\n");
+        add(&layout, "t", false, false, false).expect("add");
+        let target = layout.expand("~/.config/t/conf");
+        fs::remove_file(&target).unwrap();
+
+        {
+            let out = apply(&layout, false, true).expect("dry-run apply");
+            assert!(out.dry_run);
+            assert_eq!(out.items[0].action, ApplyAction::Linked, "该预测会建链");
+            assert!(fs::symlink_metadata(&target).is_err(), "预演真的把链建了");
+        }
+
+        // 真跑一遍，结论要对得上
+        let real = apply(&layout, false, false).expect("apply");
+        assert_eq!(real.items[0].action, ApplyAction::Linked);
+        assert!(is_symlink(&target));
+    }
+
+    // ── sync ────────────────────────────────────────────────────
+
+    /// 没有 remote 时 sync 仍要能提交本地改动并落地。
+    #[test]
+    fn sync_commits_locally_without_a_remote() {
+        let (_h, layout) = init_home("ops-sync-local", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "body\n");
+        add(&layout, "t", false, false, false).expect("add");
+
+        // 透过软链改内容 —— 等于改了 store 工作树
+        fs::write(layout.expand("~/.config/t/conf"), "changed\n").unwrap();
+
+        let out = sync(&layout, None, false).expect("sync");
+        assert!(out.commit.is_some(), "该提交本地改动");
+        assert!(!out.pushed, "没有 remote 就不该报已推送");
+        assert_eq!(out.pull, PullOutcome::Skipped);
+        assert!(!out.dry_run);
+        assert!(
+            Git::new(layout.store()).dirty_files().unwrap().is_empty(),
+            "提交后工作树该干净"
+        );
+    }
+
+    /// `sync --dry-run` 报出「将提交哪些」，但不提交。
+    #[test]
+    fn dry_run_sync_reports_pending_changes_without_committing() {
+        let (_h, layout) = init_home("ops-dry-sync", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "body\n");
+        add(&layout, "t", false, false, false).expect("add");
+        fs::write(layout.expand("~/.config/t/conf"), "changed\n").unwrap();
+
+        let out = sync(&layout, None, true).expect("dry-run sync");
+        assert!(out.dry_run);
+        assert!(out.commit.is_none());
+        assert!(!out.pushed);
+        let would = out.would_commit.expect("该报出将提交的文件");
+        assert!(
+            would.iter().any(|f| f.contains("files/.config/t/conf")),
+            "将提交的清单里该有那个文件：{would:?}"
+        );
+        assert!(
+            !Git::new(layout.store()).dirty_files().unwrap().is_empty(),
+            "预演不该真的提交"
+        );
+    }
+
+    #[test]
+    fn sync_refuses_when_store_is_not_a_repo() {
+        let home = TempHome::new("ops-sync-norepo");
+        let layout = home.layout();
+        init(&layout, None, Some("d")).expect("init");
+        fs::remove_dir_all(layout.store().join(".git")).unwrap();
+
+        assert!(sync(&layout, None, false).is_err());
+    }
+
+    // ── show ────────────────────────────────────────────────────
+
+    #[test]
+    fn show_lists_paths_with_their_current_state() {
+        let (_h, layout) = init_home("ops-show", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "body\n");
+
+        // 纳管前
+        let before = show(&layout, "t").expect("show");
+        assert!(!before.managed);
+        assert!(before.detected, "detect 路径存在就该算检测到");
+        assert_eq!(before.paths.len(), 1);
+        assert_eq!(before.paths[0].target, "~/.config/t/conf");
+        assert_eq!(
+            before.paths[0].store.as_deref(),
+            Some("files/.config/t/conf")
+        );
+        assert!(before.paths[0].exists);
+        assert!(before.adopted_by.is_none());
+
+        // 纳管后
+        add(&layout, "t", false, false, false).expect("add");
+        let after = show(&layout, "t").expect("show");
+        assert!(after.managed);
+        assert_eq!(after.adopted_by.as_deref(), Some("test-device"));
+        assert_eq!(after.paths[0].state, LinkState::Linked);
+    }
+
+    /// 未 init 也要能看定义 —— 用户装完第一件事就是想知道会动什么。
+    #[test]
+    fn show_works_before_init() {
+        let home = TempHome::new("ops-show-uninit");
+        let layout = home.layout();
+        let out = show(&layout, "ghostty").expect("未 init 也该能 show");
+        assert!(!out.managed);
+        assert!(!out.paths.is_empty());
+    }
+
+    #[test]
+    fn show_reports_unknown_app() {
+        let home = TempHome::new("ops-show-unknown");
+        let err = show(&home.layout(), "nope").expect_err("该失败");
+        assert_eq!(crate::errors::kind_of(&err), crate::ErrorKind::UnknownApp);
+    }
+
+    // ── init ────────────────────────────────────────────────────
+
+    #[test]
+    fn init_is_idempotent_and_keeps_the_device_name() {
+        let home = TempHome::new("ops-init");
+        let layout = home.layout();
+
+        let first = init(&layout, None, Some("my-mac")).expect("init");
+        assert!(!first.already);
+        assert_eq!(first.device, "my-mac");
+        assert!(layout.manifest_file().exists());
+        assert!(
+            layout.store().join(".gitignore").exists(),
+            "该挡掉 .DS_Store"
+        );
+
+        // 重复执行不该改设备名
+        let second = init(&layout, None, None).expect("再 init");
+        assert!(second.already);
+        assert_eq!(second.device, "my-mac");
+    }
 }

@@ -13,12 +13,12 @@ cloudot：macOS 配置同步器，用 git 在多台 Mac 之间同步 dotfiles。
 ```bash
 # Rust
 cargo build --release
-cargo test                                    # 73 个单元测试
+cargo test                                    # 101 个单元测试
 cargo test --package cloudot-core secrets     # 按模块名过滤
 cargo test link::tests::adopt_links_from_store_when_local_absent   # 跑单个测试
 cargo install --path crates/cloudot-cli       # 装到 ~/.cargo/bin
 
-./e2e.sh                                      # 80 项端到端断言（假 HOME，不碰真实配置）
+./e2e.sh                                      # 92 项端到端断言（假 HOME，不碰真实配置）
 
 # Swift GUI（在 apps/Cloudot/ 下）
 ./make-app.sh                                 # 构建 GUI + CLI，组装 build/Cloudot.app
@@ -86,6 +86,9 @@ JSON 统一信封，消费方只需要一条解码路径：
 - **绝不静默覆盖。** 任何破坏本地文件的操作先备份到 `~/.cloudot/backups/<时间戳>/`。`apply` 遇到本地实体文件默认拒绝（那份可能比 store 新），要覆盖必须显式 `--force`。
 - **修不好时不删任何东西。** 悬空软链自愈失败时，宁可留个坏链让 `doctor` 继续报警，也不能抹掉用户唯一的线索。
 - **`add` 要么整体成功要么整体回滚。** 回滚必须按当时实际做了什么分别处理 —— `LinkedFromStore` 那种情况下 store 里的内容是**别的机器**放的，撤销时绝对不能删。
+- **`unadopt` 也是事务性的**（`revert_unadopt`）。它是逃生门，不该有半开状态：中途失败要逆序撤销（重建软链、还原 store 副本），manifest 保持原样。**删 store 副本之前必须先备份** —— 那一刻 manifest 还没保存、也还没提交，store 里那份是唯一的副本。
+- **`plan_adopt` / `plan_unadopt` 必须和真做的分支一一对应**（同顺序、同判据、同错误分类）。两段独立代码一旦漂移，预演就会骗人，而那比没有预演更糟。有测试逐分支比对，加分支要同时加进去。
+- **flock 会被子进程短暂继承，所以 `Lock::acquire` 带重试**（30ms × 10）。`fork` 复制 fd 表在前、`exec` 应用 `O_CLOEXEC` 在后，我们全程在起 `git` —— 这中间别的线程/进程正好 fork 就会多持有锁 fd 一小会儿。**`O_CLOEXEC` 挡不住这个，已实测确认**，那是 flock 的固有性质而不是可修的 bug。别把重试删掉：不重试会出现偶发的假 `locked`（并发起子进程时才现，单独跑永远看不到）。`lock_survives_spawning_git_subprocesses` 钉住它。
 - **manifest 是共享状态（进 git），`links.toml` 是本机状态（不进 git），两者会分叉。** 别的机器 unadopt 之后本机会留下悬空软链，只看 manifest 发现不了，所以要靠 `links.toml` 对账。
 - **凭据扫描结果只报路径、行号和原因，绝不包含命中的值** —— 否则报告自己就成了泄漏渠道。
 

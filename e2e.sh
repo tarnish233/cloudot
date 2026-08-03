@@ -225,6 +225,54 @@ TOML
 grep -q twopath "$A/.cloudot/store/manifest.toml" && fail "manifest 被写脏了" || pass "manifest 干净"
 grep -q twopath "$A/.cloudot/links.toml" && fail "links.toml 被写脏了" || pass "links.toml 干净"
 
+# ─────────────────────────────────────────────── unadopt 的事务性
+# 曾经的行为：多路径应用中途失败时，前面的文件已经解链、store 副本也删了，
+# 但 manifest 还没保存 —— status 以为还在纳管，实际那几个文件已经取不回来。
+# 逃生门本身不该有半开状态。
+section "unadopt 必须整体成功或整体回滚"
+reset_pair
+export CLOUDOT_HOME="$A"
+mkdir -p "$A/.config/up"
+printf 'one = 1\n' > "$A/.config/up/one"
+printf 'two = 2\n' > "$A/.config/up/two"
+cat > "$A/.cloudot/adopters/upath.toml" <<'TOML'
+id = "upath"
+name = "Unadopt Path"
+detect = ["~/.config/up/one"]
+[[paths]]
+path = "~/.config/up/one"
+[[paths]]
+path = "~/.config/up/two"
+TOML
+"$CLOUDOT" add upath >/dev/null 2>&1 || fail "add upath 失败"
+# 让第二个文件的 store 内容消失 → 软链悬空，unadopt 会拒绝处理它
+rm "$A/.cloudot/store/files/.config/up/two"
+
+"$CLOUDOT" unadopt upath >/dev/null 2>&1 && fail "应该失败" || pass "整体失败"
+[ -L "$A/.config/up/one" ] \
+  && pass "第一个文件已回滚成软链" || fail "第一个文件没回滚成软链"
+[ "$(cat "$A/.config/up/one")" = "one = 1" ] \
+  && pass "回滚后透过软链仍读到原内容" || fail "回滚后内容不对"
+[ -f "$A/.cloudot/store/files/.config/up/one" ] \
+  && pass "store 副本已还原" || fail "store 副本没还原回来"
+grep -q upath "$A/.cloudot/store/manifest.toml" \
+  && pass "manifest 保持原样，没变成半退管" || fail "manifest 被改成半退管状态了"
+
+# 备份兜底：删 store 副本之前必须留一份
+find "$A/.cloudot/backups" -path '*up/two' -type f | grep -q . \
+  && pass "删 store 副本前留了备份" || fail "store 副本被删前没备份"
+
+section "unadopt --dry-run 不动任何东西"
+reset_pair
+export CLOUDOT_HOME="$A"
+"$CLOUDOT" unadopt ghostty --dry-run >/dev/null 2>&1 \
+  && pass "预演成功退出" || fail "预演失败"
+[ -L "$A/.config/ghostty/config" ] && pass "软链还在" || fail "预演真的解链了"
+[ -f "$A/.cloudot/store/files/.config/ghostty/config" ] \
+  && pass "store 副本还在" || fail "预演删了 store 副本"
+grep -q ghostty "$A/.cloudot/store/manifest.toml" \
+  && pass "manifest 未改" || fail "预演改了 manifest"
+
 # ─────────────────────────────────────────────── 凭据门禁
 section "疑似凭据默认拦下，--allow-secrets 才放行"
 reset_pair

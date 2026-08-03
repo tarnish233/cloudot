@@ -137,6 +137,10 @@ karabiner 被顶成实体文件后，`status` 会报 `本地是实体文件，�
 
 **`add` 要么整体成功，要么整体回滚。** 多路径 adopter（fish、zsh 都会是）中途失败时，若不回滚就会留下「文件已被链进 store，但 manifest 和 links.toml 都没记」的半纳管状态——`status` 看不见它，`unadopt` 也撤不掉。回滚必须按当时实际做了什么分别处理：`LinkedFromStore` 那种情况下 store 里的内容是**别的机器**放的，撤销时绝对不能删。
 
+**`unadopt` 同样是事务性的。** 它是逃生门，逃生门本身不该有半开状态。中途失败时会逆序撤销（软链重建、store 副本还原），manifest 保持原样。删 store 副本之前一定先备份——那一刻 manifest 还没保存、也还没提交，store 里那份是**唯一**的副本。
+
+**flock 会被子进程短暂继承，所以加锁要重试。** `fork` 复制 fd 表在前、`exec` 应用 `O_CLOEXEC` 在后，而我们全程在起 `git`；这中间只要有别的线程/进程正好在 fork，锁 fd 就被多持有一小会儿（实测确认，`O_CLOEXEC` 挡不住，那是 flock 的固有性质）。不重试的话表现是偶发的假「另一个进程正在操作」——GUI 连点两下同步就可能撞上。现在会以 30ms 间隔重试 10 次；真有另一个 cloudot 在跑长命令时，重试完照样如实报错。
+
 **凭据先拦一道再说。** 用户可以往 `~/.cloudot/adopters/` 放自定义定义，所以今天就可能纳管到 `~/.config/gh/hosts.yml` 这类文件。[secrets.rs](crates/cloudot-core/src/secrets.rs) 在动手之前扫路径规则 + 内容模式，命中就整体拒绝，要强推得加 `--allow-secrets`；`doctor` 之后会持续以 error 级别报警，因为内容已经进了 git 历史。**扫描结果只报路径、行号和原因，绝不包含命中的值**，否则报告自己就成了泄漏渠道。这不是完整的密钥管理（那要等 age 加密那一步），只是一道门禁。
 
 **并发用 flock 挡住。** `sync` 是 commit → pull --rebase → push → apply，两个进程同时跑就可能 rebase 套 rebase，而那正是会污染实时配置的中间状态。用 `flock(2)` 而不是 pid 文件：内核在 fd 关闭时自动释放，`kill -9` 也不留死锁。注意 flock 按「打开的文件描述」生效，同进程再 open 一次也会冲突——所以 `sync` 内部走的是不加锁的 `apply_inner`，[lock.rs](crates/cloudot-core/src/lock.rs) 里有测试把这个约束钉住。
@@ -259,8 +263,8 @@ SF Symbol，菜单栏和 Finder 里认的是同一个东西。刷新中和同步
 ## 测试
 
 ```bash
-cargo test              # 73 个 Rust 单元测试
-./e2e.sh                # 80 项端到端断言
+cargo test              # 101 个 Rust 单元测试
+./e2e.sh                # 92 项端到端断言
 apps/Cloudot/test.sh    # Swift 测试（契约 + 菜单栏图标 + 自更新；72 个，5 个默认跳过）
 ```
 
@@ -271,7 +275,7 @@ apps/Cloudot/test.sh    # Swift 测试（契约 + 菜单栏图标 + 自更新；
 - **回归**：跨机器 unadopt 后的悬空软链自愈；修不好时必须报警而不是装作没事
 - **回归**：rebase 冲突自动回滚，实时配置不被冲突标记污染；`resolve --theirs/--ours`；未 init 的 status 成功返回
 - **回归**：`--dry-run` 一个字节都不写（逐命令验文件系统、manifest、links.toml 均未变），不支持的命令明确报 `unsupported`
-- `add` 中途失败整体回滚，manifest 与 links.toml 均不被写脏
+- `add` / `unadopt` 中途失败整体回滚，manifest 与 links.toml 均不被写脏；unadopt 删 store 副本前留备份
 - 凭据门禁拦下、报告不回显凭据值、`--allow-secrets` 放行、`doctor` 持续报错
 - `show` 列出目标与 store 位置、带链接状态、未 init 也能用
 - store 的 `.gitignore` 生效、备份盘点与 prune

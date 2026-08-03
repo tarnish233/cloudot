@@ -267,10 +267,34 @@ fn remove_if_symlink(target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 一次 [`unadopt_file`] 实际做了什么。回滚要靠它分别处理。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnadoptAction {
+    /// 软链换回实体文件，store 副本已删。
+    RestoredFromLink,
+    /// 本地本来就是实体文件（内容可能比 store 新），只从 store 移除。
+    AlreadyReal,
+    /// 本地不存在，从 store 拷了一份出来。
+    RecreatedFromStore,
+    /// store 和本地都没有对应内容，什么都没做。
+    Nothing,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnadoptReport {
+    pub action: UnadoptAction,
+    /// 删掉 store 副本之前留的备份。回滚时用它把 store 还原回去。
+    pub store_backup: Option<PathBuf>,
+}
+
 /// 反向操作：把软链换回实体文件，并从 store 里删掉。
-pub fn unadopt_file(layout: &Layout, target: &Path, store: &Path) -> Result<()> {
+///
+/// 删 store 副本之前先备份 —— manifest 还没保存、也还没提交，此时 store 里那份
+/// 是**唯一**的副本，一旦中途失败就没有别的地方能取回它。
+pub fn unadopt_file(layout: &Layout, target: &Path, store: &Path) -> Result<UnadoptReport> {
     let store_exists = fs::symlink_metadata(store).is_ok();
-    match fs::symlink_metadata(target) {
+    let action = match fs::symlink_metadata(target) {
         Ok(md) if md.file_type().is_symlink() => {
             if !store_exists {
                 bail!(
@@ -283,9 +307,11 @@ pub fn unadopt_file(layout: &Layout, target: &Path, store: &Path) -> Result<()> 
             fs::copy(store, target).with_context(|| {
                 format!("把 {} 复制回 {} 失败", store.display(), target.display())
             })?;
+            UnadoptAction::RestoredFromLink
         }
         Ok(_) => {
             // 已经是实体文件了，本地内容优先，不动它。
+            UnadoptAction::AlreadyReal
         }
         Err(_) => {
             if store_exists {
@@ -293,14 +319,88 @@ pub fn unadopt_file(layout: &Layout, target: &Path, store: &Path) -> Result<()> 
                     fs::create_dir_all(parent)?;
                 }
                 fs::copy(store, target)?;
+                UnadoptAction::RecreatedFromStore
+            } else {
+                UnadoptAction::Nothing
             }
         }
-    }
+    };
+
+    let mut store_backup = None;
     if store_exists {
+        store_backup = Some(backup_file(layout, store, &crate::config::timestamp())?);
         fs::remove_file(store)
             .with_context(|| format!("从 store 删除 {} 失败", store.display()))?;
     }
-    Ok(())
+    Ok(UnadoptReport {
+        action,
+        store_backup,
+    })
+}
+
+/// 预测 [`unadopt_file`] 会做什么，但不动任何文件。给 `--dry-run` 用。
+///
+/// 和 [`plan_adopt`] 同一个约定：分支结构必须和真做一一对应，
+/// 否则预演会骗人。
+pub fn plan_unadopt(layout: &Layout, target: &Path, store: &Path) -> Result<UnadoptAction> {
+    let store_exists = fs::symlink_metadata(store).is_ok();
+    match fs::symlink_metadata(target) {
+        Ok(md) if md.file_type().is_symlink() => {
+            if !store_exists {
+                bail!(
+                    "{} 是软链但 store 里没有内容，先手动确认再操作",
+                    layout.contract(target)
+                );
+            }
+            Ok(UnadoptAction::RestoredFromLink)
+        }
+        Ok(_) => Ok(UnadoptAction::AlreadyReal),
+        Err(_) => Ok(if store_exists {
+            UnadoptAction::RecreatedFromStore
+        } else {
+            UnadoptAction::Nothing
+        }),
+    }
+}
+
+/// 撤销一次 [`unadopt_file`]。
+///
+/// 和 [`revert_adopt`] 同样按「当时实际做了什么」分别处理。`RestoredFromLink`
+/// 那种情况下 target 里的实体文件内容就是原来 store 里那份，直接挪回去即可，
+/// 不必动备份 —— 少一次拷贝，也不会碰到用户看得见的那个文件。
+pub fn revert_unadopt(target: &Path, store: &Path, report: &UnadoptReport) -> Result<()> {
+    let restore_store = || -> Result<()> {
+        let Some(backup) = &report.store_backup else {
+            return Ok(());
+        };
+        if let Some(parent) = store.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(backup, store)
+            .map(|_| ())
+            .with_context(|| format!("从备份 {} 还原 store 失败", backup.display()))
+    };
+
+    match report.action {
+        UnadoptAction::Nothing => Ok(()),
+        UnadoptAction::RestoredFromLink => {
+            // target 现在是实体文件，内容即原 store 那份：挪回 store 再重建软链
+            move_file(target, store)?;
+            make_link(target, store)
+        }
+        UnadoptAction::AlreadyReal => {
+            // 本地那份从头到尾没被动过，只要把 store 副本还原回去
+            restore_store()
+        }
+        UnadoptAction::RecreatedFromStore => {
+            // target 是我们刚从 store 拷出来的，撤销时该收回去
+            if fs::symlink_metadata(target).is_ok() {
+                fs::remove_file(target)
+                    .with_context(|| format!("移除 {} 失败", target.display()))?;
+            }
+            restore_store()
+        }
+    }
 }
 
 /// 备份到 `~/.cloudot/backups/<时间戳>/<家目录相对路径>`，保留原目录结构。
@@ -662,5 +762,159 @@ mod tests {
 
         unadopt_file(&layout, &target, &store).unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), "content\n");
+    }
+
+    /// 删 store 副本之前必须留备份。
+    ///
+    /// 此刻 manifest 还没保存、也还没提交，store 里那份是**唯一**的副本 ——
+    /// 中途失败又没有备份的话，内容就真的没了。
+    #[test]
+    fn unadopt_backs_up_the_store_copy_before_deleting_it() {
+        let (_h, layout, target, store) = fixture("unadopt-backup");
+        fs::write(&target, "only-copy\n").unwrap();
+        adopt_file(&layout, &target, &store, "s", false).unwrap();
+
+        let report = unadopt_file(&layout, &target, &store).unwrap();
+        assert_eq!(report.action, UnadoptAction::RestoredFromLink);
+        let backup = report.store_backup.expect("删 store 之前该留一份备份");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "only-copy\n");
+    }
+
+    // ── revert_unadopt：逃生门自己也要能撤销 ─────────────────────
+    //
+    // `unadopt` 是多路径的，第二个文件失败时第一个已经解链、store 副本也删了。
+    // 不能回滚就会留下「manifest 说还在纳管，实际已经取不回来」的半退管状态。
+
+    /// 最常见的一路：软链已换回实体文件 + store 副本已删 → 全部还原。
+    #[test]
+    fn revert_unadopt_restores_link_and_store() {
+        let (_h, layout, target, store) = fixture("revert-unadopt");
+        fs::write(&target, "body\n").unwrap();
+        adopt_file(&layout, &target, &store, "s", false).unwrap();
+
+        let report = unadopt_file(&layout, &target, &store).unwrap();
+        revert_unadopt(&target, &store, &report).unwrap();
+
+        let md = fs::symlink_metadata(&target).unwrap();
+        assert!(md.file_type().is_symlink(), "target 该重新变成软链");
+        assert_eq!(fs::read_link(&target).unwrap(), store);
+        assert_eq!(
+            fs::read_to_string(&store).unwrap(),
+            "body\n",
+            "store 副本该回来，且内容不变"
+        );
+        // 透过软链读到的还是原内容 —— 用户看到的那个文件没有被弄坏
+        assert_eq!(fs::read_to_string(&target).unwrap(), "body\n");
+    }
+
+    /// 本地已经是实体文件（被 App 顶掉过）时，unadopt 不动它，回滚也不该动。
+    #[test]
+    fn revert_unadopt_leaves_a_real_local_file_alone() {
+        let (_h, layout, target, store) = fixture("revert-unadopt-real");
+        fs::write(&store, "from-store\n").unwrap();
+        fs::write(&target, "newer-local\n").unwrap();
+
+        let report = unadopt_file(&layout, &target, &store).unwrap();
+        assert_eq!(report.action, UnadoptAction::AlreadyReal);
+        revert_unadopt(&target, &store, &report).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "newer-local\n",
+            "本地那份自始至终不该被碰"
+        );
+        assert_eq!(
+            fs::read_to_string(&store).unwrap(),
+            "from-store\n",
+            "store 副本该还原回来"
+        );
+    }
+
+    /// 本地缺失、内容是从 store 拷出来的 → 回滚要把它收回去。
+    #[test]
+    fn revert_unadopt_takes_back_a_recreated_file() {
+        let (_h, layout, target, store) = fixture("revert-unadopt-recreated");
+        fs::write(&store, "from-store\n").unwrap();
+        fs::remove_file(&target).ok();
+
+        let report = unadopt_file(&layout, &target, &store).unwrap();
+        assert_eq!(report.action, UnadoptAction::RecreatedFromStore);
+        revert_unadopt(&target, &store, &report).unwrap();
+
+        assert!(
+            fs::symlink_metadata(&target).is_err(),
+            "刚拷出来的那份该被收回，回到调用前的样子"
+        );
+        assert_eq!(fs::read_to_string(&store).unwrap(), "from-store\n");
+    }
+
+    /// 预演和真做必须给出同一个结论 —— 与 plan_adopt 同一个约定。
+    #[test]
+    fn plan_unadopt_matches_real_unadopt() {
+        type Setup = fn(&Path, &Path);
+        let cases: &[(&str, Setup)] = &[
+            // 已链好 → RestoredFromLink
+            ("linked", |t, s| {
+                fs::write(s, "x\n").unwrap();
+                std::os::unix::fs::symlink(s, t).unwrap();
+            }),
+            // 本地是实体文件 → AlreadyReal
+            ("real", |t, s| {
+                fs::write(s, "x\n").unwrap();
+                fs::write(t, "y\n").unwrap();
+            }),
+            // 本地缺失 → RecreatedFromStore
+            ("gone", |_t, s| fs::write(s, "x\n").unwrap()),
+        ];
+
+        for (tag, setup) in cases {
+            let (_h1, l1, t1, s1) = fixture(&format!("plan-un-{tag}"));
+            fs::remove_file(&t1).ok();
+            setup(&t1, &s1);
+            let planned = plan_unadopt(&l1, &t1, &s1).expect(tag);
+
+            let (_h2, l2, t2, s2) = fixture(&format!("real-un-{tag}"));
+            fs::remove_file(&t2).ok();
+            setup(&t2, &s2);
+            let real = unadopt_file(&l2, &t2, &s2).expect(tag);
+
+            assert_eq!(
+                planned, real.action,
+                "{tag}：预演说 {planned:?}，真做是 {:?}",
+                real.action
+            );
+        }
+    }
+
+    /// 软链指向 store 但 store 内容不见了 —— 预演和真做都该拒绝，别猜。
+    #[test]
+    fn plan_unadopt_refuses_dangling_link_like_the_real_thing() {
+        let (_h, layout, target, store) = fixture("plan-un-dangling");
+        fs::remove_file(&target).ok();
+        std::os::unix::fs::symlink(&store, &target).unwrap();
+
+        assert!(plan_unadopt(&layout, &target, &store).is_err());
+        assert!(unadopt_file(&layout, &target, &store).is_err());
+    }
+
+    /// 预演不能碰任何文件。
+    #[test]
+    fn plan_unadopt_touches_nothing() {
+        let (_h, layout, target, store) = fixture("plan-un-readonly");
+        fs::write(&store, "body\n").unwrap();
+        fs::remove_file(&target).ok();
+        std::os::unix::fs::symlink(&store, &target).unwrap();
+
+        plan_unadopt(&layout, &target, &store).expect("能预测");
+
+        assert!(
+            fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "预演把软链换成实体文件了"
+        );
+        assert_eq!(fs::read_to_string(&store).unwrap(), "body\n");
+        assert!(!layout.backups().exists(), "预演建了备份目录");
     }
 }
