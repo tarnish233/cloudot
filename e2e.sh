@@ -487,6 +487,57 @@ TOML
 "$CLOUDOT" --json add nomatch 2>&1 | grep -qE '"kind"[[:space:]]*:[[:space:]]*"not_detected"' \
   && pass "一个文件都没匹配到时明确报错" || fail "没匹配到却静默成功了"
 
+# ─────────────────────────────────────────────── 回归：不安全的 manifest 路径
+#
+# manifest 进 git、跨机器共享，所以它是外部输入。曾经的行为：`apply` 直接信任
+# target 与 store，实测**不需要 --force** 就能在家目录之外建软链（目标不存在时
+# 走的是「建链」分支，还会顺手把中间目录建出来）；store 字段用 `../../..` 也能
+# 让软链指到 store 之外。`add` 有 store_rel_for 门禁，但 apply 绕过了它。
+section "回归：不安全的 manifest 路径要在动手之前拒绝"
+reset_pair
+export CLOUDOT_HOME="$A"
+VICTIM="$BASE/victim"
+mkdir -p "$VICTIM"
+cat > "$A/.cloudot/store/manifest.toml" <<TOML
+version = 1
+
+[[apps]]
+id = "evil"
+name = "Evil"
+adopted_by = "attacker"
+
+[[apps.files]]
+target = "$VICTIM/planted.txt"
+store = "files/evil/payload.txt"
+strategy = "symlink"
+
+[[apps.files]]
+target = "~/.config/leaked.txt"
+store = "../../../outside-store.txt"
+strategy = "symlink"
+TOML
+mkdir -p "$A/.cloudot/store/files/evil"
+printf 'PAYLOAD\n' > "$A/.cloudot/store/files/evil/payload.txt"
+printf 'OUTSIDE\n' > "$BASE/outside-store.txt"
+
+"$CLOUDOT" --json apply 2>&1 | grep -qE '"kind"[[:space:]]*:[[:space:]]*"unsupported"' \
+  && pass "apply 拒绝不安全清单并给出 unsupported" || fail "apply 没拒绝不安全清单"
+[ -e "$VICTIM/planted.txt" ] \
+  && fail "在家目录之外建了软链" || pass "家目录之外没有被建链"
+[ -e "$A/.config/leaked.txt" ] \
+  && fail "软链指到了 store 之外" || pass "store 之外没有被建链"
+# --force 也不能放行 —— 它是「覆盖本地文件」的开关，不是「跳过安全校验」的开关
+"$CLOUDOT" apply --force >/dev/null 2>&1
+[ -e "$VICTIM/planted.txt" ] \
+  && fail "--force 放行了不安全清单" || pass "--force 也不放行"
+"$CLOUDOT" unadopt evil >/dev/null 2>&1 \
+  && fail "unadopt 没拒绝不安全清单" || pass "unadopt 也拒绝"
+# 只读命令仍要能看：清单坏掉时恰恰最需要看清里面是什么
+"$CLOUDOT" --json status 2>&1 | grep -qE '"ok"[[:space:]]*:[[:space:]]*true' \
+  && pass "status 仍可读（只读命令不受门禁影响）" || fail "status 被门禁挡住了"
+"$CLOUDOT" --json doctor 2>&1 | grep -q 'manifest-path' \
+  && pass "doctor 把它报成检查项" || fail "doctor 没报出不安全路径"
+
 section "结果"
 if [ "$FAILED" = 0 ]; then printf '\033[32m全部通过\033[0m\n'; else printf '\033[31m有失败项\033[0m\n'; fi
 exit "$FAILED"

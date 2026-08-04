@@ -155,6 +155,18 @@ pub fn run(layout: &Layout, check_network: bool) -> Result<Report> {
     // 6. 孤儿软链 —— manifest 里已经没了、本机链还在，最容易静默损坏
     let manifest = Manifest::load(layout)?;
     let records = LinkRecords::load(layout)?;
+
+    // 6.5 清单里的路径是否安全。写命令会硬拒绝，但那要等用户下次动手才发现；
+    // doctor 是「主动去看有没有问题」的地方，所以在这里报出来。
+    for problem in manifest.problems(layout) {
+        checks.push(with_hint(
+            check("manifest-path", Level::Error, problem),
+            "这份清单进 git、跨机器共享，正常由 cloudot 维护。\
+             不是你手改的话跑 `git -C ~/.cloudot/store log -p manifest.toml` 看来源；\
+             在此之前 apply / add / unadopt 都会拒绝执行。",
+        ));
+    }
+
     let orphans = links::find_orphans(layout, &manifest, &records);
     for orphan in &orphans {
         let level = match orphan.kind {

@@ -149,6 +149,9 @@ pub fn add(
     let config = Config::load(layout)?;
     let ad = adopter::get(layout, app_id)?;
     let mut manifest = Manifest::load(layout)?;
+    // 清单是跨机器共享的外部输入，动文件之前先过一遍门禁。放在展开与凭据扫描
+    // 之前：清单本身不可信时，后面那些结论都不值得算。
+    manifest.ensure_safe(layout)?;
     let mut records = LinkRecords::load(layout)?;
     let stamp = timestamp();
 
@@ -395,6 +398,9 @@ pub fn apply(layout: &Layout, force: bool, dry_run: bool) -> Result<ApplyOutcome
 /// —— flock 按打开的文件描述生效，同进程二次加锁一样会冲突。
 fn apply_inner(layout: &Layout, force: bool, dry_run: bool) -> Result<ApplyOutcome> {
     let manifest = Manifest::load(layout)?;
+    // 这是最要紧的一处：`apply` 会照着清单建软链，目标不存在时连中间目录都会建出来
+    // 且不需要 `--force`。清单从远端 pull 回来，所以必须在动手之前校验。
+    manifest.ensure_safe(layout)?;
     let mut records = LinkRecords::load(layout)?;
     let stamp = timestamp();
 
@@ -828,6 +834,9 @@ pub fn unadopt(layout: &Layout, app_id: &str, dry_run: bool) -> Result<UnadoptOu
     let _lock = Lock::acquire(layout)?;
     let config = Config::load(layout)?;
     let mut manifest = Manifest::load(layout)?;
+    // unadopt 会删 store 副本、重建软链，同样是照着清单动文件。
+    // 校验放在 `remove` 之前：坏清单要整体拒绝，不能先摘掉一个应用再报错。
+    manifest.ensure_safe(layout)?;
     let mut records = LinkRecords::load(layout)?;
     let app = manifest.remove(app_id).ok_or_else(|| {
         crate::tagged(
