@@ -1,26 +1,71 @@
 # cloudot
 
+> ## 已停止开发（归档于 2026-08，最后版本 0.6.1）
+>
+> **为什么停：同步模型处理不了多机冲突。**
+>
+> cloudot 的核心是 symlink + git：配置文件是指向 `~/.cloudot/store` 的软链，
+> store 是 git 工作树，同步就是 `commit → pull --rebase → push`。这个模型有个
+> 无法绕开的上限 —— **它只能整文件选边，不能语义合并。**
+>
+> 两台机器改了同一个配置的同一行时，cloudot 能做的只有：自动 `rebase --abort`
+> 保住实时配置不被冲突标记污染，然后让你在「要远端整份」和「要本地整份」之间选
+> 一个（`cloudot resolve --theirs/--ours`）。它不理解 `alias ll 'eza -l'` 和
+> `alias ll 'lsd -l'` 是同一个意图的两个版本，也不可能替你把两台机器各自新增的
+> 配置项合到一起 —— 那需要理解每种配置格式的语义，而不是 git 的按行 diff。
+>
+> 还有一类更隐蔽的问题：某些操作序列会**绕过冲突检测**。例如 `unadopt` 删掉
+> store 副本后再 `add`，从工具视角看是一次干净的首次纳管（store 空、本地有），
+> 但 push 是线性快进，git 不认为是冲突，于是远端内容被静默替换 —— 而 `show`
+> 和 `--dry-run` 都不会提醒，因为它们只看本地与 store，不看远端。
+> 这个缺口没有修，见 [还没做](#还没做)。
+>
+> 对「多台机器的配置应该怎么保持一致」这个问题，按行 diff + 二选一是个太粗的
+> 答案。要做对得往语义层走（结构化配置的三方合并、字段级冲突、机器特定字段的
+> 显式分离），那是另一个项目的范围，不是在这个模型上打补丁能到的。
+>
+> **仓库保留只读**：代码、7 个 Release、设计决策与踩坑记录都在。
+> Homebrew cask 已下架，`brew install --cask tarnish233/tap/cloudot` 不再可用；
+> 已发布的 DMG 仍可从 [Releases](https://github.com/tarnish233/cloudot/releases) 下载。
+>
+> ### 已经在用的人怎么安全退出
+>
+> **顺序很重要** —— 先解除纳管，再删目录。反过来会留下一堆悬空软链，
+> fish / ghostty 会直接读不到配置。
+>
+> ```bash
+> cloudot status                       # 看清纳管了哪些
+> cloudot unadopt fish ghostty karabiner gitpic   # 软链还原成实体文件（按实际清单改）
+> cloudot doctor                       # 确认没有残留悬空链
+> rm -rf ~/.cloudot                    # 里面有备份，确认不需要了再删
+> brew uninstall --cask cloudot
+> ```
+>
+> `unadopt` 是事务性的：中途失败会整体回滚，而且删 store 副本之前一定先备份到
+> `~/.cloudot/backups/`。退出纳管之后你的配置就是普通实体文件，和装 cloudot
+> 之前完全一样。
+
+---
+
 macOS 配置同步器。通过 git 在多台 Mac 之间同步 dotfiles，所有状态都在 `~/.cloudot` 下。
 
-当前纳管 **ghostty · fish · karabiner · gitpic**，只支持 **git** 后端。后续按需扩展。
+当前纳管 **ghostty · fish · karabiner · gitpic**，只支持 **git** 后端。
 
 ## 安装
 
-```bash
-brew install --cask tarnish233/tap/cloudot
-```
+**cask 已下架**，`brew install --cask tarnish233/tap/cloudot` 不再可用。
 
-一条命令装齐菜单栏 GUI 和 `cloudot` 命令 —— CLI 就在 .app 里面，Cask 顺手链到 PATH。
+仍然可以从 [Releases](https://github.com/tarnish233/cloudot/releases) 下 DMG
+（最后一版 0.6.1），或者只装 CLI：`cargo install --path crates/cloudot-cli`。
 
-装完先跑一次（没有 Apple 开发者签名，不跑的话 GUI 打不开、`cloudot` 命令也会被系统杀掉）：
+DMG 是 adhoc 签名，装完要跑一次（不跑的话 GUI 打不开、`cloudot` 命令也会被系统杀掉）：
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Cloudot.app
 ```
 
-也可以从 [Releases](https://github.com/tarnish233/cloudot/releases) 直接下 DMG，
-或者只装 CLI：`cargo install --path crates/cloudot-cli`。
 分发细节见 [apps/Cloudot/dist/README.md](apps/Cloudot/dist/README.md)。
+装之前请先读顶部的归档说明 —— 多机冲突只能整文件选边。
 
 ## 快速开始
 
@@ -328,4 +373,20 @@ cloudot --json doctor  > apps/Cloudot/Tests/CloudotTests/Fixtures/doctor.json
 
 ## 还没做
 
-按优先级：其余应用的 adopter（zsh / zed 等）· secret 扫描与 age 加密 · daemon（后台自动同步）· agent skill 与 MCP · 正式签名与公证（现在是 adhoc，用户得手动去掉隔离属性）。
+项目已停止开发，这一节留作记录 —— 说明当初打算做什么、以及哪些是**已知没修的问题**。
+
+**已知缺陷（未修）**
+
+- **`show` / `--dry-run` 不看远端。** 它们只比对本地与 store，所以「纳管后 sync
+  会把远端那份替换掉」这件事不会被提醒。`unadopt` 删掉 store 副本后再 `add`
+  正好落进这个盲区：工具视角是一次干净的首次纳管，push 又是线性快进，git 不认为
+  是冲突，于是远端内容被静默替换。修法不难（`plan_adopt` 里加一次
+  `git cat-file -p origin/main:<store 路径>`，纯本地不联网，内容不同就打警告；
+  `unadopt` 那侧同样该提醒「这会让别的机器解除纳管」），但没做。
+- **冲突只能整文件选边**，不能语义合并 —— 见顶部归档说明，这是模型本身的上限，
+  不是可以打补丁修的 bug。
+
+**原计划**
+
+其余应用的 adopter（zsh / zed 等）· secret 扫描与 age 加密 · daemon（后台自动同步）·
+agent skill 与 MCP · 正式签名与公证（现在是 adhoc，用户得手动去掉隔离属性）。

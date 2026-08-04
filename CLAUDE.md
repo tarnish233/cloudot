@@ -2,6 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 项目已停止开发（2026-08，最后版本 0.6.1）
+
+仓库在 GitHub 上已 archive（只读），Homebrew cask 已下架。**动手之前先读 README 顶部的归档说明。**
+
+停的原因是模型层面的：symlink + git 只能做**整文件选边**，处理不了多机冲突的语义合并。
+另有一个已知未修的缺口 —— `show` / `--dry-run` 不看远端，所以「unadopt 后再 add 会静默
+替换远端内容」不会被提醒（README「还没做」里记了修法）。
+
+如果要恢复开发，先决定同步模型往哪走，别急着在现有模型上加功能 —— 上面那两条不是
+补丁能解决的。
+
 ## 项目
 
 cloudot：macOS 配置同步器，用 git 在多台 Mac 之间同步 dotfiles。Rust 核心 + CLI，SwiftUI 菜单栏 GUI。当前纳管 ghostty / fish / karabiner / gitpic。
