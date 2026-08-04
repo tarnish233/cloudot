@@ -310,6 +310,20 @@ struct ApplyResult: Decodable {
 
     /// 真正发生了改变的条目，用来决定要不要在界面上提一句。
     var changedItems: [ApplyItem] { items.filter { $0.action != .alreadyLinked } }
+
+    /// 有没有需要用户知道的未完成事项。
+    ///
+    /// 两类都算：`skipped`（本地是实体文件、软链指向别处之类，cloudot 刻意没动）
+    /// 和 `HealSource.failed`（悬空软链没修好 —— 那意味着**配置此刻读不到**，
+    /// 比 skipped 更严重）。
+    ///
+    /// 放在契约类型上而不是各调用点自己判断：`sync` 和 `apply` 都要用，
+    /// 之前就是因为两处各写一遍，`apply` 查了 skipped 而 `sync` 什么都没查，
+    /// 于是同一份结果在两条路径上一个报警告、一个报成功。
+    var needsAttention: Bool {
+        changedItems.contains { $0.action == .skipped }
+            || healed.contains { $0.source == .failed }
+    }
 }
 
 struct ApplyItem: Decodable, Identifiable {

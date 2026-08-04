@@ -327,9 +327,7 @@ impl Git {
         }
         let limit = crate::errors::CONFLICT_DIFF_LIMIT;
         if text.len() > limit {
-            let mut cut = text[..limit].to_owned();
-            cut.push_str("\n…（diff 过长，已截断）");
-            (cut, true)
+            (truncate_on_char_boundary(&text, limit), true)
         } else {
             (text, false)
         }
@@ -423,5 +421,81 @@ impl Git {
             .ok()?;
         // 退出码 2 = 连上了但没有匹配的 ref（空仓库），也算可达
         Some(out.status.success() || out.status.code() == Some(2))
+    }
+}
+
+/// 在不超过 `limit` 字节的前提下按**字符边界**截断，并附上截断说明。
+///
+/// `&text[..limit]` 会 panic：`limit` 是字节数，落在多字节字符中间时 Rust 直接
+/// 中止（`end byte index N is not a char boundary`）。配置文件里中文注释很常见，
+/// 而这条路径专门处理冲突报告 —— 冲突时 panic 掉，用户拿到的就不是「diff 太长被
+/// 截断」而是一个崩溃，连带看不到该选哪边。
+///
+/// 往前退而不是往后进：结果必须 ≤ limit，否则截断就没起到限制大小的作用。
+fn truncate_on_char_boundary(text: &str, limit: usize) -> String {
+    let mut end = limit.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n…（diff 过长，已截断）", &text[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 边界正好落在汉字中间时不能 panic。
+    ///
+    /// 这是回归测试：原来是 `&text[..limit]`，实测 panic 信息是
+    /// `end byte index 65536 is not a char boundary; it is inside '配'`。
+    #[test]
+    fn truncates_multibyte_text_without_panicking() {
+        let limit = crate::errors::CONFLICT_DIFF_LIMIT;
+        // 前 limit-1 个 ASCII，再放一个 3 字节汉字 —— 边界就落在它的第 2 个字节上
+        let mut text = "a".repeat(limit - 1);
+        text.push('配');
+        text.push_str("后面还有很多内容");
+        assert!(
+            !text.is_char_boundary(limit),
+            "这个用例得让边界落在字符中间"
+        );
+
+        let cut = truncate_on_char_boundary(&text, limit);
+        assert!(cut.starts_with(&"a".repeat(limit - 1)), "该保留前面的内容");
+        assert!(cut.contains("已截断"), "要告诉用户被截断了");
+        // 退一个字节到边界，那个汉字整体被丢掉
+        assert!(!cut.contains('配'));
+    }
+
+    /// 截出来的内容不能超过上限 —— 否则截断就没意义了。
+    #[test]
+    fn truncated_content_stays_within_the_limit() {
+        for limit in [1, 2, 3, 16, 1024] {
+            let text = "配".repeat(limit * 2);
+            let cut = truncate_on_char_boundary(&text, limit);
+            let body = cut
+                .strip_suffix("\n…（diff 过长，已截断）")
+                .expect("有后缀");
+            assert!(
+                body.len() <= limit,
+                "limit={limit} 时截出了 {} 字节",
+                body.len()
+            );
+        }
+    }
+
+    /// 纯 ASCII 走的是最常见的路径，边界天然对齐。
+    #[test]
+    fn truncates_ascii_at_the_exact_limit() {
+        let cut = truncate_on_char_boundary(&"x".repeat(100), 10);
+        assert!(cut.starts_with(&"x".repeat(10)));
+        assert!(!cut.starts_with(&"x".repeat(11)));
+    }
+
+    /// limit 比文本还长时不该越界。
+    #[test]
+    fn handles_a_limit_beyond_the_text() {
+        let cut = truncate_on_char_boundary("短", 4096);
+        assert!(cut.starts_with('短'));
     }
 }

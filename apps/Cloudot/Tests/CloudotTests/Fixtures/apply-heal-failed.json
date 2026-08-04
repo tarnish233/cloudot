@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "result": {
+    "dry_run": false,
+    "healed": [
+      {
+        "app": "t",
+        "kind": "dangling",
+        "note": "移除软链 /tmp/hf/home/.config/t/conf 失败: Permission denied (os error 13)",
+        "source": "failed",
+        "target": "~/.config/t/conf"
+      }
+    ],
+    "items": []
+  },
+  "schema": "cloudot.apply/v1"
+}

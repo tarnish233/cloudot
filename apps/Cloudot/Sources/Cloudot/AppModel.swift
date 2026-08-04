@@ -290,7 +290,12 @@ final class AppModel {
         isWorking = true
         do {
             let dmg = try await Updater.download(check)
-            try Updater.install(dmg: dmg, expecting: check.latest)
+            // 搬离主线程：install 里是同步的 hdiutil / ditto 等待（超时上限
+            // 60 + 120 秒），留在主 actor 上整个 App 会僵住 —— 菜单栏也点不动。
+            // 下载阶段本来就是 async 的，只有这一段是同步的。
+            try await Task.detached(priority: .userInitiated) {
+                try Updater.install(dmg: dmg, expecting: check.latest)
+            }.value
             let version = check.latest.description
             pendingRestartVersion = version
             banner = .ok("已更新到 \(version)", "重启应用后生效。")
@@ -567,7 +572,12 @@ final class AppModel {
                 for item in result.applied.changedItems {
                     parts.append("\(item.target)：\(item.action.label)")
                 }
-                return .ok("同步完成", parts.joined(separator: "\n"))
+                // 修复失败意味着那份配置此刻读不到（悬空软链），跳过则是刻意没动 ——
+                // 两者都不能配绿色成功 banner：详情里写着「修复失败」而标题说
+                // 「同步完成」，用户只会相信标题。
+                return result.applied.needsAttention
+                    ? .warn("同步完成，但有条目需要你处理", parts.joined(separator: "\n"))
+                    : .ok("同步完成", parts.joined(separator: "\n"))
             } catch {
                 // 冲突：打开面板而不是只丢一条 banner
                 if let cloudot = error as? CloudotError,
@@ -617,10 +627,12 @@ final class AppModel {
             }
             let lines = result.healed.map { "\($0.target)：\($0.source.label)" }
                 + changed.map { "\($0.target)：\($0.action.label)" }
-            let skipped = changed.filter { $0.action == .skipped }
-            return skipped.isEmpty
-                ? .ok("落地完成", lines.joined(separator: "\n"))
-                : .warn("部分条目跳过了", lines.joined(separator: "\n"))
+            // 这里原来只看 skipped，漏掉了 heal 失败 —— 那类更严重（配置读不到），
+            // 却因为不在 items 里而被算成成功。判断收在 needsAttention 里，
+            // 和 sync 共用同一个判据。
+            return result.needsAttention
+                ? .warn("部分条目需要你处理", lines.joined(separator: "\n"))
+                : .ok("落地完成", lines.joined(separator: "\n"))
         }
     }
 

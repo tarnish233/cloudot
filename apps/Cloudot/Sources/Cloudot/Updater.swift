@@ -165,7 +165,12 @@ enum Updater {
     ///
     /// `replacing` 默认是正在跑的这个 .app；测试和本地 e2e 会传一个副本路径 ——
     /// `Bundle.main.bundleURL` 在 `swift test` 里指向 toolchain，不能拿来真换。
-    static func install(
+    ///
+    /// **`nonisolated`，必须在主线程之外跑**（调用点用 `Task.detached`）。挂载、
+    /// 复制、校验全是同步的子进程等待：`hdiutil` 超时上限 60 秒、`ditto` 120 秒，
+    /// 留在主 actor 上就是整个 App 卡住不响应 —— 不只是那个窗口，菜单栏也点不动。
+    /// 里面没有任何主 actor 状态（只读 `Bundle.main` 和文件系统），所以搬得动。
+    nonisolated static func install(
         dmg: URL,
         expecting: SemanticVersion,
         replacing target: URL = Bundle.main.bundleURL
@@ -212,7 +217,7 @@ enum Updater {
 
     /// 校验拷出来的 bundle 真的能用、且版本号是期望的那个。
     /// 不做这一步的话，一个损坏或者版本不对的 DMG 会让用户换到一个打不开的 app。
-    private static func verify(_ bundle: URL, expecting: SemanticVersion) throws {
+    nonisolated private static func verify(_ bundle: URL, expecting: SemanticVersion) throws {
         let binary = bundle.appending(path: "Contents/MacOS/Cloudot")
         guard FileManager.default.isExecutableFile(atPath: binary.path) else {
             throw UpdateError.installFailed("新版本里没有可执行文件")
@@ -259,7 +264,7 @@ enum Updater {
     /// 输出量大的命令就会死锁（实测往 stderr 灌 310KB 就卡住不返回），所以从一开始
     /// 就按安全的写法来。超时也是必须的 —— 损坏的 DMG 能让 `hdiutil attach` 挂住。
     @discardableResult
-    private static func run(
+    nonisolated private static func run(
         _ tool: String, _ arguments: [String], timeout: TimeInterval
     ) throws -> String {
         guard FileManager.default.isExecutableFile(atPath: tool) else {

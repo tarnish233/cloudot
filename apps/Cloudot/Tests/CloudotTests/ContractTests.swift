@@ -146,6 +146,25 @@ final class ContractTests: XCTestCase {
     func testApplyDecodes() throws {
         let result = try decodeOK("apply", ApplyResult.self)
         XCTAssertTrue(result.items.allSatisfy { !$0.target.isEmpty })
+        // 一切正常的 apply 不该被判成「需要处理」
+        XCTAssertFalse(result.needsAttention)
+    }
+
+    /// 悬空软链没修好时必须算「需要处理」。
+    ///
+    /// 回归：`sync` 原来无条件报成功 banner，`apply` 只查了 `skipped`。两条路径都
+    /// 漏掉 `HealSource.failed` —— 而那一类恰恰更严重（软链悬空 = 配置此刻读不到），
+    /// 结果界面显示绿色「同步完成」，详情里却写着「修复失败」。
+    ///
+    /// fixture 是真跑出来的：把配置目录 chmod 500 让 heal 写不进去。
+    func testFailedHealNeedsAttention() throws {
+        let result = try decodeOK("apply-heal-failed", ApplyResult.self)
+        XCTAssertEqual(result.healed.first?.source, .failed)
+        XCTAssertTrue(result.changedItems.isEmpty, "这份 fixture 里 items 是空的")
+        XCTAssertTrue(
+            result.needsAttention,
+            "heal 失败不在 items 里，光看 items 会把它当成没事发生"
+        )
     }
 
     // MARK: - 错误信封
