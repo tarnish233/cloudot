@@ -538,6 +538,82 @@ printf 'OUTSIDE\n' > "$BASE/outside-store.txt"
 "$CLOUDOT" --json doctor 2>&1 | grep -q 'manifest-path' \
   && pass "doctor 把它报成检查项" || fail "doctor 没报出不安全路径"
 
+# ─────────────────────────────────────────────── 回归：add 是增量的
+#
+# 曾经的行为：`expand_paths` 只看得见本机此刻存在的文件，结果被整体塞进 manifest。
+# 实测症状：移走一个已纳管文件后重跑 `add`，那个条目从清单里静默消失、store 文件
+# 变成没人管的孤儿，而 `status` 照样报 healthy —— 别的机器同步后也会停止纳管它。
+section "回归：重跑 add 不删既有纳管条目"
+reset_pair
+export CLOUDOT_HOME="$A"
+mkdir -p "$A/.config/inc/conf.d"
+printf 'one = 1\n' > "$A/.config/inc/conf.d/one.conf"
+printf 'two = 2\n' > "$A/.config/inc/conf.d/two.conf"
+cat > "$A/.cloudot/adopters/inc.toml" <<'TOML'
+id = "inc"
+name = "Incremental"
+detect = ["~/.config/inc/conf.d"]
+[[paths]]
+path    = "~/.config/inc/conf.d"
+include = ["*.conf"]
+TOML
+"$CLOUDOT" add inc >/dev/null 2>&1 || fail "add inc 失败"
+
+# 软链被误删（或目录还没同步下来）—— 本机此刻看不到 two.conf
+rm "$A/.config/inc/conf.d/two.conf"
+"$CLOUDOT" add inc >/dev/null 2>&1 || fail "重跑 add 失败"
+grep -q 'two.conf' "$A/.cloudot/store/manifest.toml" \
+  && pass "既有条目仍在清单里" || fail "既有纳管条目被静默删除"
+[ -L "$A/.config/inc/conf.d/two.conf" ] \
+  && pass "顺手从 store 修回了软链" || fail "没有修回软链"
+# 增量不代表不收新文件
+printf 'three = 3\n' > "$A/.config/inc/conf.d/three.conf"
+"$CLOUDOT" add inc >/dev/null 2>&1
+grep -q 'three.conf' "$A/.cloudot/store/manifest.toml" \
+  && pass "新增文件仍会被收进来" || fail "增量之后收不到新文件"
+
+# ─────────────────────────────────────────────── 回归：提交阶段失败也整体回滚
+#
+# 曾经的行为：文件循环成功之后，manifest.save / records.save / commit 里任何一个
+# `?` 都直接抛错，绕过补偿逻辑。实测（pre-commit hook 返回 1）：退出码 1，但配置
+# 已移进 store、本地已成软链、manifest 已记为纳管、git 还留着 staged 改动。
+section "回归：提交失败时 add 整体回滚"
+reset_pair
+export CLOUDOT_HOME="$A"
+mkdir -p "$A/.config/tx"
+printf 'body\n' > "$A/.config/tx/conf"
+cat > "$A/.cloudot/adopters/tx.toml" <<'TOML'
+id = "tx"
+name = "Tx"
+detect = ["~/.config/tx/conf"]
+[[paths]]
+path = "~/.config/tx/conf"
+TOML
+# 与本次无关的暂存改动：回滚绝不能把它一起撤掉
+printf 'mine\n' > "$A/.cloudot/store/unrelated.txt"
+git -C "$A/.cloudot/store" add unrelated.txt
+printf '#!/bin/sh\nexit 1\n' > "$A/.cloudot/store/.git/hooks/pre-commit"
+chmod +x "$A/.cloudot/store/.git/hooks/pre-commit"
+
+"$CLOUDOT" add tx >/dev/null 2>&1 \
+  && fail "提交失败却报了成功" || pass "提交失败以非零码退出"
+[ -L "$A/.config/tx/conf" ] \
+  && fail "本地还是软链（没回滚）" || pass "本地已回滚成实体文件"
+[ "$(cat "$A/.config/tx/conf")" = "body" ] \
+  && pass "内容原样回来了" || fail "内容没回来"
+[ -e "$A/.cloudot/store/files/.config/tx/conf" ] \
+  && fail "store 里留了残留" || pass "store 里没有残留"
+grep -q 'id = "tx"' "$A/.cloudot/store/manifest.toml" \
+  && fail "manifest 被写脏" || pass "manifest 没被写脏"
+grep -q 'tx' "$A/.cloudot/links.toml" 2>/dev/null \
+  && fail "links.toml 被写脏" || pass "links.toml 没被写脏"
+# 索引也要干净：commit_all 走 `git add -A`，只还原工作树不够
+git -C "$A/.cloudot/store" show :manifest.toml 2>/dev/null | grep -q 'tx' \
+  && fail "索引里的 manifest 还带着本次改动" || pass "索引里没留下本次改动"
+git -C "$A/.cloudot/store" show :unrelated.txt 2>/dev/null | grep -q 'mine' \
+  && pass "无关的暂存改动没被牵连" || fail "回滚把无关的暂存改动撤掉了"
+rm -f "$A/.cloudot/store/.git/hooks/pre-commit"
+
 section "结果"
 if [ "$FAILED" = 0 ]; then printf '\033[32m全部通过\033[0m\n'; else printf '\033[31m有失败项\033[0m\n'; fi
 exit "$FAILED"

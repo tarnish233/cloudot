@@ -117,7 +117,7 @@ exclude = ["cargo.fish", "homebrew.fish", "uv.env.fish", "*.bak"]
 
 三条刻意的取舍：
 
-- **展开发生在 `add` 时**，manifest 里存的仍是**具体文件清单** —— `apply` / `status` / `doctor` 因此完全不需要知道 glob 的存在，`links.toml` 对账也照旧。代价是本机新增一个 `conf.d/foo.fish` 之后要重跑 `cloudot add fish` 才会纳管它（`cloudot show fish` 能先看会收哪些）。
+- **展开发生在 `add` 时**，manifest 里存的仍是**具体文件清单** —— `apply` / `status` / `doctor` 因此完全不需要知道 glob 的存在，`links.toml` 对账也照旧。代价是本机新增一个 `conf.d/foo.fish` 之后要重跑 `cloudot add fish` 才会纳管它（`cloudot show fish` 能先看会收哪些）。重跑是**增量**的，不会删掉本机此刻看不到的已纳管条目（见下面的「`add` 是增量的」）。
 - **只匹配单层文件名，不支持递归。** `**` 那种展开会把 `completions/`、`automatic_backups/` 那类运行时目录一起带上，而那正是要避开的。glob 只认 `*` 和 `?`，实现在 `adopter.rs` 里几十行，不引入依赖。
 - **排除规则只在 adopter 里显式列**，core 里没有隐式默认。加一个新工具就在定义里补一行 —— 这样「为什么某个文件没被同步」永远能在定义里查到，而不是藏在代码某处。
 
@@ -151,6 +151,16 @@ karabiner 被顶成实体文件后，`status` 会报 `本地是实体文件，�
 **store 工作树就是用户的实时配置，所以它永远不能停在中间状态。** 软链目标直接指向工作树，一旦 `git pull --rebase` 冲突残留 `UU` 状态，App 立刻就会读到塞满 `<<<<<<< HEAD` 的配置文件。所以拉取冲突时会自动 `rebase --abort`，保住本地那份继续生效，再给出结构化的冲突报告（文件列表 + 每文件 diff）。用户在 App 冲突面板里选边，或终端跑 `cloudot resolve --theirs`（对齐远端）/ `--ours`（保留本地并 `--force-with-lease` 推上去）。
 
 **manifest 是共享状态，软链是本地状态，两者会分叉。** 另一台机器 `unadopt` 之后，manifest 里没了、store 文件也删了，但本机的软链还在——那就成了悬空软链，App 直接读不到配置。只看 manifest 发现不了这种情况，所以本机额外记一份 `links.toml`（不进 git）用来对账。`apply` 会自动修复：先从 git 历史取回被删掉的内容，取不到就找最近的备份，还原成实体文件。**修不好时不删任何东西**——宁可留个坏链让 `doctor` 继续报警，也不能把用户唯一的线索抹掉。
+
+**`add` 是增量的。** 重跑 `cloudot add fish` 只会补上新文件，**不会**因为本机此刻看不到某个已纳管文件就把它从清单里摘掉。`expand_paths` 只看得见本机存在的文件，而 manifest 是跨机器共享的：软链被误删、目录还没同步下来、或者那个文件本来是别的机器纳管的，都会让它暂时「不存在」。曾经的行为是拿展开结果整体替换清单，于是那些条目静默消失、store 里的文件变成没人管的孤儿，而 `status` 照样报 healthy —— 连 `doctor` 都发现不了，因为它对账靠的是「links.toml 有、manifest 没有」，而 `add` 把两边一起清了。**删除只能走显式的 `unadopt`。**
+
+**manifest 是外部输入，动文件之前先校验。** 它进 git、跨机器共享，所以一个被改过的仓库或者手滑的编辑就能让 `apply` 在家目录之外建软链 —— 实测**不需要 `--force`**：目标不存在时走的是「建链」分支，还会顺手把中间目录建出来。`store` 字段用 `../../..` 同样能让软链指到 store 之外。`add` 写进去的路径过了 `store_rel_for` 的门禁，但从远端 pull 回来的那份没有，所以 `apply` / `add` / `unadopt` 现在都先跑一遍 `Manifest::ensure_safe`：target 必须在家目录内、store 必须**正好等于** target 推导出的位置（这一条同时挡住 store 逃逸和 target/store 张冠李戴）、版本不能超出本版本认识的范围、target 不能重复。整体拒绝而不是跳过坏条目 —— 清单是机器维护的，它坏了就是异常状态，「6 条里默默少做 1 条」比明确报错更难查。
+
+只读命令**刻意不受这道门禁影响**：`status` / `show` 照旧能读，清单坏掉的时候恰恰最需要看清里面是什么；`doctor` 把每个问题报成 error 级检查项，那是用户主动发现它的正常途径。
+
+**事务边界包含提交阶段。** `add` / `unadopt` 的「要么整体成功要么整体回滚」原先只覆盖文件循环：`manifest.save` / `records.save` / `commit_all` 里任何一个 `?` 都会绕过补偿逻辑。实测（pre-commit hook 返回 1）留下的是最难查的一种状态 —— 退出码 1，但配置已移进 store、本地已成软链、manifest 已记为纳管、git 还留着 staged 改动。现在这三步失败时会逆序撤销文件操作、把两份清单还原成**原始字节**（不是重新序列化），并把本次碰过的路径从索引里撤下来。
+
+索引那一步必须**按路径**撤，不能用整体 `git reset`：store 工作树就是用户的实时配置，「改完配置还没 sync」是最常见的状态，整体 reset 会把那些无关改动一起撤掉 —— 修一个 bug 制造另一个。撤销列表里一定要包含 `manifest.toml`：`commit_all` 走的是 `git add -A`，光还原工作树不够，索引里那份仍带着本次的条目（`git status` 会显示 `MM`）。
 
 **绝不静默覆盖。** 任何会破坏本地文件的操作都先备份到 `~/.cloudot/backups/<时间戳>/`。`apply` 遇到本地实体文件默认拒绝——那份内容可能比 store 新——要覆盖必须显式 `--force`。`unadopt` 是逃生门，随时能把配置拿回来。
 
@@ -282,9 +292,9 @@ SF Symbol，菜单栏和 Finder 里认的是同一个东西。刷新中和同步
 ## 测试
 
 ```bash
-cargo test              # 110 个 Rust 单元测试
-./e2e.sh                # 102 项端到端断言
-apps/Cloudot/test.sh    # Swift 测试（契约 + 菜单栏图标 + 自更新；72 个，5 个默认跳过）
+cargo test              # 129 个 Rust 单元测试
+./e2e.sh                # 120 项端到端断言
+apps/Cloudot/test.sh    # Swift 测试（契约 + 菜单栏图标 + 自更新；73 个，5 个默认跳过）
 ```
 
 `e2e.sh` 在 `/tmp/cloudot-e2e` 下用假 `HOME` 模拟两台机器 + 一个 bare remote，完全不碰真实的 `~/.config` 和 `~/.cloudot`。覆盖：
@@ -294,6 +304,9 @@ apps/Cloudot/test.sh    # Swift 测试（契约 + 菜单栏图标 + 自更新；
 - **回归**：跨机器 unadopt 后的悬空软链自愈；修不好时必须报警而不是装作没事
 - **回归**：rebase 冲突自动回滚，实时配置不被冲突标记污染；`resolve --theirs/--ours`；未 init 的 status 成功返回
 - **回归**：`--dry-run` 一个字节都不写（逐命令验文件系统、manifest、links.toml 均未变），不支持的命令明确报 `unsupported`
+- **回归**：不安全的 manifest 路径在动手之前被拒（家目录之外、store 逃逸、`--force` 也不放行），只读命令仍可读、`doctor` 报成检查项
+- **回归**：重跑 `add` 不删既有纳管条目，但仍会收新文件
+- **回归**：提交阶段失败（pre-commit hook 拒绝）时 `add` 整体回滚，且不牵连无关的暂存改动
 - `add` / `unadopt` 中途失败整体回滚，manifest 与 links.toml 均不被写脏；unadopt 删 store 副本前留备份
 - 凭据门禁拦下、报告不回显凭据值、`--allow-secrets` 放行、`doctor` 持续报错
 - `show` 列出目标与 store 位置、带链接状态、未 init 也能用

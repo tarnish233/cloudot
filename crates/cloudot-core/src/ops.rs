@@ -109,6 +109,78 @@ pub fn init(layout: &Layout, remote: Option<&str>, device: Option<&str>) -> Resu
 
 // ---------------------------------------------------------------- add
 
+/// 提交阶段之前的状态快照，用于在最后一步失败时把两份清单还原回去。
+///
+/// 存的是**原始字节**而不是解析后的结构：还原要的是「回到一模一样的样子」，
+/// 重新序列化可能因为字段顺序或默认值的变化产生 diff。`None` 表示那时文件还不存在
+/// （首次 `add`），还原就是把它删掉。
+struct StateSnapshot {
+    manifest: Option<Vec<u8>>,
+    records: Option<Vec<u8>>,
+}
+
+impl StateSnapshot {
+    fn take(layout: &Layout) -> Self {
+        Self {
+            manifest: fs::read(layout.manifest_file()).ok(),
+            records: fs::read(layout.links_file()).ok(),
+        }
+    }
+
+    /// 尽最大努力还原；把没能还原的写成人能看懂的说明返回。
+    fn restore(&self, layout: &Layout) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (path, saved) in [
+            (layout.manifest_file(), &self.manifest),
+            (layout.links_file(), &self.records),
+        ] {
+            let done = match saved {
+                Some(bytes) => fs::write(&path, bytes),
+                // 原本没有这个文件（首次 add），删掉就是还原
+                None => match fs::remove_file(&path) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    other => other,
+                },
+            };
+            if let Err(e) = done {
+                errors.push(format!("  {} —— {e}", path.display()));
+            }
+        }
+        errors
+    }
+}
+
+/// 把这次事务碰过的 store 路径从索引里撤下来。
+///
+/// **刻意不用 `git reset`（无路径）**：store 工作树是用户的实时配置，里面很可能有与
+/// 本次操作无关的未提交改动（改完配置还没 sync 就很常见）。整体 reset 会把那些一起
+/// 撤掉，那是在修一个 bug 的时候制造另一个。
+///
+/// `manifest.toml` 一定要在列表里：`commit_all` 走的是 `git add -A`，所以清单的新版本
+/// 已经进了索引，光把工作树的文件还原回去不够 —— 索引里那份还留着这次的改动，
+/// `git status` 会显示 `MM`，`git diff --cached` 能看到本该消失的条目。
+/// （`links.toml` 不在 store 里、不进 git，还原文件本身就够了。）
+///
+/// 已知局限：`git add -A` 顺带把用户原本未暂存的改动也暂存了，这里不会替他们撤回去
+/// —— 那些改动没丢，只是从「未暂存」变成「已暂存」，而 cloudot 自己每次提交前都
+/// `add -A`，对它的工作流没有影响。
+fn unstage(git: &Git, store_paths: &[String]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for rel in store_paths
+        .iter()
+        .map(String::as_str)
+        .chain(["manifest.toml"])
+    {
+        // `--` 之后是路径，避免和分支名歧义；已经不在索引里的路径 reset 也不报错
+        if let Ok((ok, _, err)) = git.try_run(&["reset", "--quiet", "HEAD", "--", rel])
+            && !ok
+        {
+            errors.push(format!("  {rel} —— {}", err.trim()));
+        }
+    }
+    errors
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct FileOutcome {
     pub target: String,
@@ -129,6 +201,42 @@ pub struct AddOutcome {
     /// 「发生了什么」，只是要配合这个字段读成「将会发生什么」。
     #[serde(default)]
     pub dry_run: bool,
+}
+
+/// 既有 manifest 条目 ∪ 本次展开结果，既有条目在前、顺序稳定。
+///
+/// `add` 因此是**增量**的：重跑只会补新文件，不会因为本机暂时看不到某个文件就把它
+/// 从清单里摘掉（那等于替用户做了 `unadopt` 的决定，而 store 里的副本还留着，
+/// 变成没人管的孤儿 —— 实测这种状态 `doctor` 都发现不了，因为它对账靠的是
+/// 「links.toml 有、manifest 没有」，而 `add` 把两边一起清了）。
+///
+/// 既有条目的 strategy 沿用清单里记的那个：adopter 定义可能改过，但已经落地的
+/// 文件该按当初纳管的方式继续对待，换策略是另一件事。
+fn merge_with_managed(
+    layout: &Layout,
+    managed: Option<&ManagedApp>,
+    expanded: Vec<(String, Strategy)>,
+) -> Vec<(String, Strategy)> {
+    let Some(app) = managed else {
+        return expanded;
+    };
+    let mut out: Vec<(String, Strategy)> = Vec::new();
+    for file in &app.files {
+        // 既有条目也要过门禁：#3 的校验拦的是「拿来动文件」，这里是把它带进新清单，
+        // 同样不能放行坏路径，否则「保留既有条目」就成了保留恶意条目。
+        if layout
+            .store_rel_for(&layout.expand(&file.target))
+            .is_ok_and(|rel| rel == file.store)
+        {
+            out.push((file.target.clone(), file.strategy));
+        }
+    }
+    for (path, strategy) in expanded {
+        if !out.iter().any(|(existing, _)| *existing == path) {
+            out.push((path, strategy));
+        }
+    }
+    out
 }
 
 /// 纳管一个应用：备份本地配置 → 移进 store → 建软链 → 记 manifest → 提交。
@@ -154,11 +262,19 @@ pub fn add(
     manifest.ensure_safe(layout)?;
     let mut records = LinkRecords::load(layout)?;
     let stamp = timestamp();
+    // 提交阶段失败时要把两份清单还原回去，所以快照必须在动任何盘之前取。
+    let snapshot = StateSnapshot::take(layout);
 
     // glob 在这里一次性展开成具体文件，后面的探测、凭据扫描、纳管循环都消费
     // 同一份清单 —— 否则三处各扫一次目录，中间有文件增删就会各说各话。
     // manifest 里存的仍是展开后的确定清单（见 `Adopter::expand_paths`）。
-    let targets = ad.expand_paths(layout);
+    //
+    // **和既有条目合并，不是替换。** `expand_paths` 只看得见本机此刻存在的文件，
+    // 而 manifest 是跨机器共享的：别的机器纳管过、或者本机这个文件暂时不在
+    // （软链被误删、目录还没同步下来）时，重跑 `add` 若直接用展开结果覆盖，
+    // 那些条目就静默消失了 —— store 里的文件还在，但没人再管它，`status` 也
+    // 照样报 healthy。删除必须走显式的 `unadopt`。
+    let targets = merge_with_managed(layout, manifest.app(&ad.id), ad.expand_paths(layout));
 
     let store_has_any = targets.iter().any(|(path, _)| {
         layout
@@ -314,11 +430,39 @@ pub fn add(
         });
     }
 
-    manifest.save(layout)?;
-    records.save(layout)?;
-
-    let commit = Git::new(layout.store())
-        .commit_all(&format!("cloudot: adopt {} on {}", ad.id, config.device))?;
+    let git = Git::new(layout.store());
+    let commit = match manifest
+        .save(layout)
+        .and_then(|()| records.save(layout))
+        .and_then(|()| git.commit_all(&format!("cloudot: adopt {} on {}", ad.id, config.device)))
+    {
+        Ok(commit) => commit,
+        // 走到这里文件已经全部移进 store、软链也建好了，但清单没写成 / 提交没成功
+        // （pre-commit hook 拒绝、磁盘满、store 权限变了都会到这儿）。
+        // 不回滚的话留下的是最难查的一种状态：本地看着已纳管，实际清单里没有它。
+        Err(err) => {
+            let mut unwind_errors = Vec::new();
+            for (target, store, report) in done.iter().rev() {
+                if let Err(e) = link::revert_adopt(target, store, report) {
+                    unwind_errors.push(format!("  {} —— {e:#}", layout.contract(target)));
+                }
+            }
+            unwind_errors.extend(snapshot.restore(layout));
+            unwind_errors.extend(unstage(
+                &git,
+                &files.iter().map(|f| f.store.clone()).collect::<Vec<_>>(),
+            ));
+            return Err(if unwind_errors.is_empty() {
+                err.context(format!("纳管 {} 失败，已回滚本次全部改动", ad.name))
+            } else {
+                err.context(format!(
+                    "纳管 {} 失败，而且回滚不完整，需要手工检查：\n{}",
+                    ad.name,
+                    unwind_errors.join("\n")
+                ))
+            });
+        }
+    };
 
     Ok(AddOutcome {
         id: ad.id,
@@ -838,6 +982,8 @@ pub fn unadopt(layout: &Layout, app_id: &str, dry_run: bool) -> Result<UnadoptOu
     // 校验放在 `remove` 之前：坏清单要整体拒绝，不能先摘掉一个应用再报错。
     manifest.ensure_safe(layout)?;
     let mut records = LinkRecords::load(layout)?;
+    // 和 add 一样：提交阶段失败要还原两份清单，快照得在动盘之前取。
+    let snapshot = StateSnapshot::take(layout);
     let app = manifest.remove(app_id).ok_or_else(|| {
         crate::tagged(
             crate::ErrorKind::NotAdopted,
@@ -907,10 +1053,42 @@ pub fn unadopt(layout: &Layout, app_id: &str, dry_run: bool) -> Result<UnadoptOu
         });
     }
 
-    manifest.save(layout)?;
-    records.save(layout)?;
-    let commit = Git::new(layout.store())
-        .commit_all(&format!("cloudot: unadopt {} on {}", app.id, config.device))?;
+    let git = Git::new(layout.store());
+    let commit = match manifest
+        .save(layout)
+        .and_then(|()| records.save(layout))
+        .and_then(|()| git.commit_all(&format!("cloudot: unadopt {} on {}", app.id, config.device)))
+    {
+        Ok(commit) => commit,
+        // unadopt 是逃生门，半开状态尤其不能留：软链已经换回实体文件、store 副本也
+        // 删了，但清单里这个应用还完整 —— `status` 以为还在纳管，实际早已脱管。
+        Err(err) => {
+            let mut unwind_errors = Vec::new();
+            for (target, store, report) in done.iter().rev() {
+                if let Err(e) = link::revert_unadopt(target, store, report) {
+                    unwind_errors.push(format!("  {} —— {e:#}", layout.contract(target)));
+                }
+            }
+            unwind_errors.extend(snapshot.restore(layout));
+            unwind_errors.extend(unstage(
+                &git,
+                &app.files
+                    .iter()
+                    .map(|f| f.store.clone())
+                    .collect::<Vec<_>>(),
+            ));
+            return Err(if unwind_errors.is_empty() {
+                err.context(format!("退出纳管 {} 失败，已回滚本次全部改动", app.name))
+            } else {
+                err.context(format!(
+                    "退出纳管 {} 失败，而且回滚不完整，需要手工检查：\n{}\n\
+                     store 里被删掉的内容在 ~/.cloudot/backups 里还有一份。",
+                    app.name,
+                    unwind_errors.join("\n")
+                ))
+            });
+        }
+    };
 
     Ok(UnadoptOutcome {
         id: app.id,
@@ -1129,6 +1307,228 @@ mod tests {
         // 即使第一个路径无害，也不该已经被移走
         assert!(!is_symlink(&layout.expand("~/.config/t/conf")));
         assert!(!layout.store_path("files/.config/t/conf").exists());
+    }
+
+    // ── 提交阶段失败也要整体回滚（回归）────────────────────────
+    //
+    // 曾经的行为：文件循环全部成功之后，`manifest.save` / `records.save` /
+    // `commit_all` 里任何一个 `?` 都会直接把错误抛出去，绕过前面的补偿逻辑。
+    // 实测症状（pre-commit hook 返回 1）：退出码 1，但配置已移进 store、本地已成
+    // 软链、manifest 已记为纳管、git 还留着 staged 改动 —— 和注释里写的
+    // 「要么整体成功要么整体回滚」正好相反。
+
+    /// 装一个必然失败的 pre-commit hook，用来逼出提交阶段的错误。
+    ///
+    /// 比让 `manifest.save` 失败更贴近真实：hook 失败、磁盘满、store 权限变了
+    /// 都会走到同一段代码，而 hook 是唯一能在测试里稳定复现的。
+    fn install_failing_hook(layout: &Layout) {
+        let hooks = layout.store().join(".git/hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        fs::write(&hook, "#!/bin/sh\necho 'hook 拒绝' >&2\nexit 1\n").unwrap();
+        let mut perm = fs::metadata(&hook).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+        fs::set_permissions(&hook, perm).unwrap();
+    }
+
+    #[test]
+    fn add_rolls_back_when_the_commit_fails() {
+        let (_h, layout) = init_home("ops-add-commit-fail", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "body\n");
+        install_failing_hook(&layout);
+
+        let err = add(&layout, "t", false, false, false).expect_err("提交失败该整体失败");
+        assert!(format!("{err:#}").contains("已回滚"), "错误里该说明回滚了");
+
+        let target = layout.expand("~/.config/t/conf");
+        assert!(!is_symlink(&target), "该回滚成实体文件");
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "body\n",
+            "内容必须原样回来"
+        );
+        assert!(
+            !layout.store_path("files/.config/t/conf").exists(),
+            "store 里不该有残留"
+        );
+        assert!(
+            Manifest::load(&layout).unwrap().app("t").is_none(),
+            "manifest 不该留下这次的条目"
+        );
+        assert!(
+            LinkRecords::load(&layout).unwrap().links.is_empty(),
+            "links.toml 不该留下这次的记录"
+        );
+        // 索引里也不能留 —— `commit_all` 走 `git add -A`，只还原工作树不够：
+        // 索引里那份仍带着本次的条目，`git status` 会显示 MM
+        let staged = Git::new(layout.store())
+            .try_run(&["show", ":manifest.toml"])
+            .map(|(_, out, _)| out)
+            .unwrap_or_default();
+        assert!(
+            !staged.contains("~/.config/t/conf"),
+            "索引里的 manifest 还带着本次改动：{staged}"
+        );
+    }
+
+    /// 回滚不能牵连本次操作之外的改动。
+    ///
+    /// store 工作树就是用户的实时配置，「改完配置还没 sync」是最常见的状态。
+    /// 用整体 `git reset` 清索引会把那些一起撤掉 —— 修一个 bug 制造另一个。
+    #[test]
+    fn commit_rollback_leaves_unrelated_staged_changes_alone() {
+        let (_h, layout) = init_home("ops-add-commit-unrelated", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "body\n");
+
+        let git = Git::new(layout.store());
+        fs::write(layout.store().join("unrelated.txt"), "mine\n").unwrap();
+        git.try_run(&["add", "unrelated.txt"]).unwrap();
+
+        install_failing_hook(&layout);
+        add(&layout, "t", false, false, false).expect_err("该失败");
+
+        let (ok, staged, _) = git.try_run(&["show", ":unrelated.txt"]).unwrap();
+        assert!(ok && staged.contains("mine"), "无关的暂存改动被撤掉了");
+    }
+
+    #[test]
+    fn unadopt_rolls_back_when_the_commit_fails() {
+        let (_h, layout) = init_home("ops-unadopt-commit-fail", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "body\n");
+        add(&layout, "t", false, false, false).expect("add");
+        install_failing_hook(&layout);
+
+        let err = unadopt(&layout, "t", false).expect_err("提交失败该整体失败");
+        assert!(format!("{err:#}").contains("已回滚"));
+
+        // 逃生门回滚后应当**回到纳管中**的样子，而不是半退管
+        assert!(
+            is_symlink(&layout.expand("~/.config/t/conf")),
+            "软链该重建回来"
+        );
+        assert!(
+            layout.store_path("files/.config/t/conf").exists(),
+            "store 副本该还原回来"
+        );
+        assert!(
+            Manifest::load(&layout).unwrap().app("t").is_some(),
+            "manifest 该保持原样（还在纳管）"
+        );
+        assert_eq!(
+            LinkRecords::load(&layout).unwrap().links.len(),
+            1,
+            "links.toml 该保持原样"
+        );
+    }
+
+    // ── add 是增量的（回归）──────────────────────────────────
+    //
+    // 曾经的行为：`expand_paths` 只看得见本机此刻存在的文件，而它的结果被整体
+    // 塞进 manifest。实测症状：移走一个已纳管文件后重跑 `add`，那个条目从清单里
+    // 静默消失、store 文件变成没人管的孤儿，而 `status` 照样报 healthy ——
+    // 别的机器同步后也会跟着停止纳管它。
+
+    /// 本机暂时看不到的已纳管文件，重跑 add 不能把它从清单里摘掉。
+    ///
+    /// **必须用 glob 定义来测**：`expand_paths` 对单文件条目是原样透传的（存不存在都
+    /// 返回），只有目录 + include 那条路径会「本机没有就不出现在结果里」。
+    /// 拿单文件条目写这个测试的话，把修复回退掉它照样通过 —— 试过，所以留这行注释。
+    #[test]
+    fn add_keeps_managed_entries_whose_local_file_is_gone() {
+        let home = TempHome::new("ops-add-incremental");
+        let layout = home.layout();
+        init(&layout, None, Some("test-device")).expect("init");
+        let dir = layout.expand("~/.config/t/conf.d");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("one.conf"), "one\n").unwrap();
+        fs::write(dir.join("two.conf"), "two\n").unwrap();
+        fs::write(
+            layout.adopters_dir().join("t.toml"),
+            "id = \"t\"\nname = \"T\"\ndetect = [\"~/.config/t/conf.d\"]\n\
+             [[paths]]\npath = \"~/.config/t/conf.d\"\ninclude = [\"*.conf\"]\n",
+        )
+        .unwrap();
+        add(&layout, "t", false, false, false).expect("首次 add");
+
+        // 软链被误删 / 目录还没同步下来，都是这个形态
+        fs::remove_file(dir.join("two.conf")).unwrap();
+
+        add(&layout, "t", false, false, false).expect("重跑 add");
+
+        let manifest = Manifest::load(&layout).unwrap();
+        let targets: Vec<&str> = manifest
+            .app("t")
+            .expect("t 还该在")
+            .files
+            .iter()
+            .map(|f| f.target.as_str())
+            .collect();
+        assert!(
+            targets.contains(&"~/.config/t/conf.d/two.conf"),
+            "已纳管条目被静默删掉了：{targets:?}"
+        );
+        // store 里的内容还在，所以该被修回来（从 store 建链）而不是留成孤儿
+        assert!(is_symlink(&dir.join("two.conf")));
+    }
+
+    /// 增量不代表不收新文件 —— glob 目录里新增的仍要纳管进来。
+    #[test]
+    fn add_still_picks_up_newly_added_files() {
+        let home = TempHome::new("ops-add-glob-new");
+        let layout = home.layout();
+        init(&layout, None, Some("test-device")).expect("init");
+        let dir = layout.expand("~/.config/t/conf.d");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.conf"), "a\n").unwrap();
+        fs::write(
+            layout.adopters_dir().join("t.toml"),
+            "id = \"t\"\nname = \"T\"\ndetect = [\"~/.config/t/conf.d\"]\n\
+             [[paths]]\npath = \"~/.config/t/conf.d\"\ninclude = [\"*.conf\"]\n",
+        )
+        .unwrap();
+        add(&layout, "t", false, false, false).expect("首次 add");
+
+        fs::write(dir.join("b.conf"), "b\n").unwrap();
+        add(&layout, "t", false, false, false).expect("重跑 add");
+
+        let manifest = Manifest::load(&layout).unwrap();
+        let targets: Vec<&str> = manifest
+            .app("t")
+            .unwrap()
+            .files
+            .iter()
+            .map(|f| f.target.as_str())
+            .collect();
+        assert!(targets.contains(&"~/.config/t/conf.d/a.conf"));
+        assert!(
+            targets.contains(&"~/.config/t/conf.d/b.conf"),
+            "新增文件没被收进来：{targets:?}"
+        );
+    }
+
+    /// 合并既有条目时也要过路径门禁，否则「保留既有条目」就成了保留恶意条目。
+    #[test]
+    fn add_drops_unsafe_entries_instead_of_carrying_them_forward() {
+        let (_h, layout) = init_home("ops-add-merge-unsafe", &[".config/t/conf"]);
+        write_home_file(&layout, ".config/t/conf", "body\n");
+        assert_eq!(
+            merge_with_managed(
+                &layout,
+                Some(&ManagedApp {
+                    id: "t".into(),
+                    name: "T".into(),
+                    adopted_by: "attacker".into(),
+                    files: vec![ManagedFile {
+                        target: "/etc/passwd".into(),
+                        store: "files/evil".into(),
+                        strategy: Strategy::Symlink,
+                    }],
+                }),
+                vec![("~/.config/t/conf".to_owned(), Strategy::Symlink)],
+            ),
+            vec![("~/.config/t/conf".to_owned(), Strategy::Symlink)],
+            "家目录之外的既有条目不该被带进新清单"
+        );
     }
 
     // ── unadopt 的事务性（回归：逃生门不能半开）─────────────────

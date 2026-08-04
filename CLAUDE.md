@@ -13,17 +13,17 @@ cloudot：macOS 配置同步器，用 git 在多台 Mac 之间同步 dotfiles。
 ```bash
 # Rust
 cargo build --release
-cargo test                                    # 110 个单元测试
+cargo test                                    # 129 个单元测试
 cargo test --package cloudot-core secrets     # 按模块名过滤
 cargo test link::tests::adopt_links_from_store_when_local_absent   # 跑单个测试
 cargo install --path crates/cloudot-cli       # 装到 ~/.cargo/bin
 
-./e2e.sh                                      # 102 项端到端断言（假 HOME，不碰真实配置）
+./e2e.sh                                      # 120 项端到端断言（假 HOME，不碰真实配置）
 
 # Swift GUI（在 apps/Cloudot/ 下）
 ./make-app.sh                                 # 构建 GUI + CLI，组装 build/Cloudot.app
 MAKE_DMG=1 ./make-app.sh                      # 顺带打发布用的 DMG + .sha256
-./test.sh                                     # 72 个测试（含 5 个默认跳过：2 截图 + 3 更新 e2e）
+./test.sh                                     # 73 个测试（含 5 个默认跳过：2 截图 + 3 更新 e2e）
 ./test.sh --filter ContractTests              # 跑单个 test class
 swift build                                   # 只编译，不组装 bundle
 ./demo-states.sh                              # 沙盒里走遍菜单栏各状态
@@ -84,6 +84,12 @@ JSON 统一信封，消费方只需要一条解码路径：
 `link.rs` / `links.rs` 改动要格外小心，它们直接决定用户配置会不会丢：
 
 - **绝不静默覆盖。** 任何破坏本地文件的操作先备份到 `~/.cloudot/backups/<时间戳>/`。`apply` 遇到本地实体文件默认拒绝（那份可能比 store 新），要覆盖必须显式 `--force`。
+- **manifest 是外部输入（进 git、跨机器共享），写路径动手之前必须 `ensure_safe`。** `apply` / `add` / `unadopt` 都过这道门禁：target 必须在家目录内、store 必须**正好等于** `store_rel_for(target)`、版本不超上限、target 不重复。不校验时实测**不需要 `--force`** 就能在家目录之外建软链（目标不存在走「建链」分支，还会建中间目录），`store` 用 `../../..` 也能指到 store 之外。**只读命令刻意不受影响**（`status` / `show` 照旧能读，清单坏掉时最需要看清内容），`doctor` 把问题报成 error 级检查项。加新的写命令要记得也过一遍。
+- **事务边界包含提交阶段。** `manifest.save` / `records.save` / `commit_all` 失败也要整体回滚 —— 不回滚留下的是最难查的状态（本地看着已纳管，清单里没有它）。还原两份清单用**原始字节快照**（`StateSnapshot`，不重新序列化），快照必须在动任何盘之前取。
+- **清索引只能按路径 `git reset HEAD -- <path>`，绝不整体 `git reset`。** store 工作树是用户的实时配置，里面常有与本次无关的未提交改动，整体 reset 会连它们一起撤掉。撤销列表**必须包含 `manifest.toml`**：`commit_all` 走 `git add -A`，只还原工作树不够，索引里那份仍带着本次改动（`git status` 显示 `MM`）。
+- **`add` 是增量的（`merge_with_managed`）。** `expand_paths` 只看得见本机此刻存在的文件，直接拿它替换 manifest 会把「本机暂时看不到」的已纳管条目静默删掉 —— store 文件变孤儿，而 `status` 报 healthy、`doctor` 也发现不了（它对账靠「links.toml 有、manifest 没有」，而 `add` 把两边一起清了）。删除只能走 `unadopt`。合并进来的既有条目**同样要过路径门禁**，否则「保留既有条目」就成了保留恶意条目。
+  - 写这条的回归测试**必须用 glob 定义**：单文件条目在 `expand_paths` 里是原样透传的（存不存在都返回），拿它写测试把修复回退掉照样通过 —— 试过。
+- **`git.rs` 里截断字符串一律走 `truncate_on_char_boundary`。** `&text[..limit]` 会 panic（`limit` 是字节数，落在汉字中间时直接中止），而这条路径专门处理冲突报告 —— 那时候 panic 掉，用户拿到的不是「diff 太长」而是一个崩溃。
 - **修不好时不删任何东西。** 悬空软链自愈失败时，宁可留个坏链让 `doctor` 继续报警，也不能抹掉用户唯一的线索。
 - **`add` 要么整体成功要么整体回滚。** 回滚必须按当时实际做了什么分别处理 —— `LinkedFromStore` 那种情况下 store 里的内容是**别的机器**放的，撤销时绝对不能删。
 - **`unadopt` 也是事务性的**（`revert_unadopt`）。它是逃生门，不该有半开状态：中途失败要逆序撤销（重建软链、还原 store 副本），manifest 保持原样。**删 store 副本之前必须先备份** —— 那一刻 manifest 还没保存、也还没提交，store 里那份是唯一的副本。
@@ -132,7 +138,8 @@ JSON 统一信封，消费方只需要一条解码路径：
 - **FSEvents 必须同时监视 `store/files` 和每个纳管文件所在的目录。** 实测：通过软链改配置只在 **store** 侧报事件（`~/.config` 一侧一个都没有）；软链被替换写入顶掉只在 **配置目录** 侧报。少监视一处就会漏掉一整类变化。见 `ConfigWatcherTests`。
 - **改动类操作后有 3 秒抑制窗口**（`selfWriteGrace`）：`sync` / `apply` / `add` 会真写 store，FSEvents 的回声会再触发一轮刷新，而那些操作本来就会自己刷。`status` 是纯只读，实测不产生事件。
 - **任何改动操作之后一定重新拉 `status`**，界面绝不自己推测新状态。
-- **自更新走下载 DMG 替换，不用 Sparkle。** 版本发现靠 `releases/latest` 的 302（**不用 GitHub API**，匿名限额按 IP 共享会直接不可用）。替换顺序不能反：先 `ditto` 到 `.Cloudot.app.new` 并校验，再 `mv` 旧的让位 —— 反过来中途失败就没 app 了。装完**不**自动重启，界面问。**目标路径取 `Bundle.main.bundleURL`，不硬编码 `/Applications`**；但 `swift test` 环境下这个值指向 toolchain，路径相关逻辑只能靠 `CLOUDOT_UPDATE_E2E=1` 的真安装测试或手点验收。`isCheckingForUpdate` **刻意不进 `isBusy`**，否则后台查更新会把同步/刷新一起变灰。详情与本地假源验收步骤见 [dist/README.md](apps/Cloudot/dist/README.md)。
+- **落地结果是否「需要用户处理」由契约类型上的 `ApplyResult.needsAttention` 统一判断**，`sync` 和 `apply` 共用。两处各写一遍的后果实测过：`apply` 查了 `skipped` 而 `sync` 什么都没查，于是同一份结果一个报警告一个报成功。判据包含 `HealSource.failed` —— 它不在 `items` 里，只看 `items` 会把「悬空软链没修好」（**配置此刻读不到**）当成没事发生，配一个绿色成功 banner。
+- **自更新走下载 DMG 替换，不用 Sparkle。** 版本发现靠 `releases/latest` 的 302（**不用 GitHub API**，匿名限额按 IP 共享会直接不可用）。替换顺序不能反：先 `ditto` 到 `.Cloudot.app.new` 并校验，再 `mv` 旧的让位 —— 反过来中途失败就没 app 了。装完**不**自动重启，界面问。**目标路径取 `Bundle.main.bundleURL`，不硬编码 `/Applications`**；但 `swift test` 环境下这个值指向 toolchain，路径相关逻辑只能靠 `CLOUDOT_UPDATE_E2E=1` 的真安装测试或手点验收。`Updater.install` 是 `nonisolated`、**必须用 `Task.detached` 跑**：里面是同步的 `hdiutil` / `ditto` 等待（超时上限 60 + 120 秒），留在主 actor 上整个 App 会僵住，菜单栏也点不动。`isCheckingForUpdate` **刻意不进 `isBusy`**，否则后台查更新会把同步/刷新一起变灰。详情与本地假源验收步骤见 [dist/README.md](apps/Cloudot/dist/README.md)。
 
 ### 应用图标
 
